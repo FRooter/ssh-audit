@@ -80,13 +80,16 @@ def usage(err=None):
     uout.info('   -4,  --ipv4             enable IPv4 (order of precedence)')
     uout.info('   -6,  --ipv6             enable IPv6 (order of precedence)')
     uout.info('   -p,  --port=<port>      port to connect')
+    uout.info('   -t,  --timeout=<secs>   timeout (in seconds) for connection and reading\n                               (default: 5)')
+    uout.info('')
     uout.info('   -b,  --batch            batch output')
     uout.info('   -c,  --client-audit     starts a server on port 2222 to audit client\n                               software config (use -p to change port;\n                               use -t to change timeout)')
-    uout.info('   -n,  --no-colors        disable colors')
+    uout.info('   -P,  --policy=<policy.txt>  run a policy test')
+    uout.info('')
     uout.info('   -j,  --json             JSON output')
-    uout.info('   -v,  --verbose          verbose output')
     uout.info('   -l,  --level=<level>    minimum output level (info|warn|fail)')
-    uout.info('   -t,  --timeout=<secs>   timeout (in seconds) for connection and reading\n                               (default: 5)')
+    uout.info('   -n,  --no-colors        disable colors')
+    uout.info('   -v,  --verbose          verbose output')
     uout.sep()
     sys.exit(1)
 
@@ -108,6 +111,8 @@ class AuditConf:
         self.ipvo = ()  # type: Sequence[int]
         self.ipv4 = False
         self.ipv6 = False
+        self.policy_file = None
+        self.policy = None
         self.timeout = 5.0
         self.timeout_set = False  # Set to True when the user explicitly sets it.
 
@@ -152,6 +157,9 @@ class AuditConf:
             if value == -1.0:
                 raise ValueError('invalid timeout: {0}'.format(value))
             valid = True
+        elif (name == 'policy_file') or (name == 'policy'):
+            valid = True
+                
         if valid:
             object.__setattr__(self, name, value)
 
@@ -161,9 +169,8 @@ class AuditConf:
         # pylint: disable=too-many-branches
         aconf = cls()
         try:
-            sopts = 'h1246p:bcnjvl:t:'
-            lopts = ['help', 'ssh1', 'ssh2', 'ipv4', 'ipv6', 'port=', 'json',
-                     'batch', 'client-audit', 'no-colors', 'verbose', 'level=', 'timeout=']
+            sopts = 'h1246p:P:jbcnvl:t:'
+            lopts = ['help', 'ssh1', 'ssh2', 'ipv4', 'ipv6', 'port=', 'policy=', 'json', 'batch', 'client-audit', 'no-colors', 'verbose', 'level=', 'timeout=']
             opts, args = getopt.gnu_getopt(args, sopts, lopts)
         except getopt.GetoptError as err:
             usage_cb(str(err))
@@ -200,6 +207,8 @@ class AuditConf:
             elif o in ('-t', '--timeout'):
                 aconf.timeout = float(a)
                 aconf.timeout_set = True
+            elif o in ('-P', '--policy'):
+                aconf.policy_file = a
         if len(args) == 0 and aconf.client_audit is False:
             usage_cb()
         if aconf.client_audit is False:
@@ -228,6 +237,15 @@ class AuditConf:
         aconf.port = port
         if not (aconf.ssh1 or aconf.ssh2):
             aconf.ssh1, aconf.ssh2 = True, True
+
+        # If a policy file was provided, validate it.
+        if aconf.policy_file is not None:
+            try:
+                aconf.policy = Policy(policy_file=aconf.policy_file)
+            except Exception as e:
+                print("Error while loading policy file: %s" % str(e))
+                sys.exit(-1)
+
         return aconf
 
 
@@ -3010,6 +3028,20 @@ def output(banner, header, client_host=None, kex=None, pkm=None):
         out.warn("\n\n!!! WARNING: unknown algorithm(s) found!: %s.  Please email the full output above to the maintainer (jtesta@positronsecurity.com), or create a Github issue at <https://github.com/jtesta/ssh-audit/issues>.\n" % ','.join(unknown_algorithms))
 
 
+def evaluate_policy(policy, banner, header, kex=None):
+    passed, errors = policy.evaluate(banner, header, kex)
+    print("Host:   %s" % 'hostname')
+    print("Policy: %s" % policy.get_name_and_version())
+    print("Result: ", end='')
+    if passed:
+        out.good("✔ Passed")
+    else:
+        out.fail("❌ Failed!")
+        out.warn("\nErrors:\n  * %s" % '\n  * '.join(errors))
+
+    return passed
+        
+
 class Utils:
     @classmethod
     def _type_err(cls, v, target):
@@ -3131,6 +3163,131 @@ class Utils:
             return float(v)
         except Exception:  # pylint: disable=bare-except
             return -1.0
+
+
+# Validates policy files and performs policy testing
+class Policy:
+
+    def __init__(self, policy_file=None, policy_data=None):
+        self._name = None
+        self._version = None
+        self._banner = None
+        self._header = None
+        self._compression = None
+        self._host_keys = None
+        self._kex = None
+        self._ciphers = None
+        self._macs = None
+
+        if (policy_file is None) and (policy_data is None):
+            raise RuntimeError('policy_file and policy_data must not both be None.')
+        elif (policy_file is not None) and (policy_data is not None):
+            raise RuntimeError('policy_file and policy_data must not both be specified.')
+
+        if policy_file is not None:
+            with open(policy_file, "r") as f:
+                policy_data = f.readlines()
+
+        self._parse_policy(policy_data)
+
+
+    def _parse_policy(self, policy_data):
+
+        for line in policy_data:
+            line = line.strip()
+            if (len(line) == 0) or line.startswith('#'):
+                continue
+
+            key = None
+            val = None
+            try:
+                key, val = line.split('=')
+            except ValueError as e:
+                raise ValueError("could not parse line: %s" % line)
+
+            key = key.strip()
+            val = val.strip()
+
+            if key not in ['name', 'version', 'banner', 'header', 'compression', 'host keys', 'key exchanges', 'ciphers', 'macs']:
+                raise ValueError("invalid field found in policy file (%s): %s" % (policy_file, line))
+
+            if key in ['name', 'banner', 'header']:
+
+                # If the banner value is blank, set it to "" so that the code below handles it.
+                if len(val) < 2:
+                    val = "\"\""
+
+                # Remove the surrounding quotes, unescape quotes & newlines.
+                val = val[1:-1].replace("\\\"", "\"").replace("\\n", "\n")
+                if key == 'name':
+                    self._name = val
+                elif key == 'banner':
+                    self._banner = val
+                else:
+                    self._header = val
+            elif key == 'version':
+                self._version = val
+            elif key == 'compression':
+                if val not in ['true', 'false']:
+                    raise ValueError('invalid value for compression field in policy file (%s): must be true or false: %s' % (policy_file, val))
+
+                self._compression = True if val == 'true' else False
+
+            elif key in ['host keys', 'key exchanges', 'ciphers', 'macs']:
+                try:
+                    algs = val.split(',')
+                except ValueError as e:
+                    # If the value has no commas, then set the algorithm list to just the value.
+                    algs = [val]
+
+                algs = list(map(str.strip, algs))
+                if key == 'host keys':
+                    self._host_keys = algs
+                elif key == 'key exchanges':
+                    self._kex = algs
+                elif key == 'ciphers':
+                    self._ciphers = algs
+                elif key == 'macs':
+                    self._macs = algs
+
+
+    def evaluate(self, banner, header, kex):
+        ret = True
+        errors = []
+
+        if (self._banner is not None) and (banner != self._banner):
+            ret = False
+            errors.append('Banner did not match. Expected: [%s]; Actual: [%s]' % (self._banner, banner))
+
+        if (self._header is not None) and (header != self._header):
+            ret = False
+            errors.append('Header did not match. Expected: [%s]; Actual: [%s]' % (self._header, header))
+
+        if (self._host_keys is not None) and (kex.key_algorithms != self._host_keys):
+            ret = False
+            errors.append('Host key types did not match. Expected: %s; Actual: %s' % (self._host_keys, kex.key_algorithms))
+
+        if (self._kex is not None) and (kex.kex_algorithms != self._kex):
+            ret = False
+            errors.append('Key exchanges did not match. Expected: %s; Actual: %s' % (self._kex, kex.kex_algorithms))
+
+        if (self._ciphers is not None) and (kex.server.encryption != self._ciphers):
+            ret = False
+            errors.append('Ciphers did not match. Expected: %s; Actual: %s' % (self._ciphers, kex.server.encryption))
+
+        if (self._macs is not None) and (kex.server.mac != self._macs):
+            ret = False
+            errors.append('MACs did not match. Expected: %s; Actual: %s' % (self._macs, kex.server.mac))
+
+        return ret, errors
+
+
+    def get_name_and_version(self):
+        return '%s v%s' % (self._name, self._version)
+
+
+    def __str__(self):
+        return "Name: %s\nVersion: %s\nBanner: [%s]\nHeader: [%s]\nCompression: %r\nHost Keys: %s\nKey Exchanges: %s\nCiphers: %s\nMACs: %s" % (self._name, self._version, self._banner, self._header, self._compression, ', '.join(self._host_keys), ', '.join(self._kex), ', '.join(self._ciphers), ', '.join(self._macs))
 
 
 def build_struct(banner, kex=None, pkm=None, client_host=None):
@@ -3273,6 +3430,8 @@ def audit(aconf, sshv=None):
             SSH2.GEXTest.run(s, kex)
         if aconf.json:
             print(json.dumps(build_struct(banner, kex=kex, client_host=s.client_host), sort_keys=True))
+        elif aconf.policy is not None:
+            evaluate_policy(aconf.policy, banner, header, kex=kex)
         else:
             output(banner, header, client_host=s.client_host, kex=kex)
 
