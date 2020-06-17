@@ -25,6 +25,7 @@
    THE SOFTWARE.
 """
 from __future__ import print_function
+from datetime import date
 import base64
 import binascii
 import errno
@@ -159,9 +160,9 @@ class AuditConf:
             if value == -1.0:
                 raise ValueError('invalid timeout: {0}'.format(value))
             valid = True
-        elif (name == 'policy_file') or (name == 'policy'):
+        elif name in ['policy_file', 'policy']:
             valid = True
-                
+
         if valid:
             object.__setattr__(self, name, value)
 
@@ -2974,7 +2975,7 @@ def output(aconf, banner, header, client_host=None, kex=None, pkm=None):
     if aconf.json:
         print(json.dumps(build_struct(banner, kex=kex, client_host=client_host), sort_keys=True))
         return
-    
+
     client_audit = client_host is not None  # If set, this is a client audit.
     sshv = 1 if pkm is not None else 2
     algs = SSH.Algorithms(pkm, kex)
@@ -3042,7 +3043,7 @@ def output(aconf, banner, header, client_host=None, kex=None, pkm=None):
 def evaluate_policy(aconf, banner, header, kex=None):
     passed, errors = aconf.policy.evaluate(banner, header, kex)
     if aconf.json:
-        json_struct = { 'host': aconf.host, 'policy': aconf.policy.get_name_and_version(), 'passed': passed, 'errors': errors }
+        json_struct = {'host': aconf.host, 'policy': aconf.policy.get_name_and_version(), 'passed': passed, 'errors': errors}
         print(json.dumps(json_struct, sort_keys=True))
     else:
         print("Host:   %s" % aconf.host)
@@ -3209,14 +3210,14 @@ class Policy:
 
         if policy_file is not None:
             with open(policy_file, "r") as f:
-                policy_data = f.readlines()
+                policy_data = f.read()
 
         self._parse_policy(policy_data)
 
 
     def _parse_policy(self, policy_data):
 
-        for line in policy_data:
+        for line in policy_data.split("\n"):
             line = line.strip()
             if (len(line) == 0) or line.startswith('#'):
                 continue
@@ -3225,7 +3226,7 @@ class Policy:
             val = None
             try:
                 key, val = line.split('=')
-            except ValueError as e:
+            except ValueError:
                 raise ValueError("could not parse line: %s" % line)
 
             key = key.strip()
@@ -3257,11 +3258,13 @@ class Policy:
             elif key in ['compressions', 'host keys', 'key exchanges', 'ciphers', 'macs']:
                 try:
                     algs = val.split(',')
-                except ValueError as e:
+                except ValueError:
                     # If the value has no commas, then set the algorithm list to just the value.
                     algs = [val]
 
-                algs = list(map(str.strip, algs))
+                # Strip whitespace in each algorithm name.
+                algs = [alg.strip() for alg in algs]
+
                 if key == 'compressions':
                     self._compressions = algs
                 elif key == 'host keys':
@@ -3281,8 +3284,6 @@ class Policy:
 
     @staticmethod
     def create(host, banner, header, kex):
-        from datetime import date
-
         today = date.today().strftime('%Y/%m/%d')
         compressions = ', '.join(kex.server.compression)
         host_keys = ', '.join(kex.key_algorithms)
@@ -3548,7 +3549,7 @@ def audit(aconf, sshv=None):
             make_policy(aconf, banner, header, kex=kex)
 
         else:
-            raise RuntimeError('Internal error while handling output: %r %r' % (aconf.policy == None, aconf.make_policy))
+            raise RuntimeError('Internal error while handling output: %r %r' % (aconf.policy is None, aconf.make_policy))
 
 
 
