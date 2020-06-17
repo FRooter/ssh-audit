@@ -196,7 +196,7 @@ macs = mac_alg1, mac_alg2, mac_alg3'''
 
 
     def test_policy_evaluate_passing_1(self):
-        '''Creates a policy and evaluates it against a passing server'''
+        '''Creates a policy and evaluates it against the same server'''
 
         kex = self._get_kex()
         policy_data = self.Policy.create('www.l0l.com', None, None, kex)
@@ -314,3 +314,24 @@ macs = mac_alg1, mac_alg2, XXXmismatched, mac_alg3'''
         assert ret is False
         assert len(errors) == 1
         assert errors[0].find('MACs did not match.') != -1
+
+
+    def test_policy_evaluate_failing_7(self):
+        '''Ensure that a mismatched host keys and MACs results in a failure'''
+
+        policy_data = '''name = "Test Policy"
+version = 1
+compressions = comp_alg1, comp_alg2
+host keys = key_alg1, key_alg2, XXXmismatchedXXX
+key exchanges = kex_alg1, kex_alg2
+ciphers = cipher_alg1, cipher_alg2, cipher_alg3
+macs = mac_alg1, mac_alg2, XXXmismatchedXXX, mac_alg3'''
+
+        policy = self.Policy(policy_data=policy_data)
+        ret, errors = policy.evaluate('SSH Server 1.0', None, self._get_kex())
+        assert ret is False
+        assert len(errors) == 2
+
+        errors_str = ', '.join(errors)
+        assert errors_str.find('Host key types did not match.') != -1
+        assert errors_str.find('MACs did not match.') != -1
