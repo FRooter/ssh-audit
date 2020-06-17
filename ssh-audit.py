@@ -3212,11 +3212,6 @@ class Policy:
             with open(policy_file, "r") as f:
                 policy_data = f.read()
 
-        self._parse_policy(policy_data)
-
-
-    def _parse_policy(self, policy_data):
-
         for line in policy_data.split("\n"):
             line = line.strip()
             if (len(line) == 0) or line.startswith('#'):
@@ -3284,12 +3279,25 @@ class Policy:
 
     @staticmethod
     def create(host, banner, header, kex):
+        '''Creates a policy based on a server configuration.  Returns a string.'''
+
         today = date.today().strftime('%Y/%m/%d')
-        compressions = ', '.join(kex.server.compression)
-        host_keys = ', '.join(kex.key_algorithms)
-        kex_algs = ', '.join(kex.kex_algorithms)
-        ciphers = ', '.join(kex.server.encryption)
-        macs = ', '.join(kex.server.mac)
+        compressions = None
+        host_keys = None
+        kex_algs = None
+        ciphers = None
+        macs = None
+
+        if kex.server.compression is not None:
+            compressions = ', '.join(kex.server.compression)
+        if kex.key_algorithms is not None:
+            host_keys = ', '.join(kex.key_algorithms)
+        if kex.kex_algorithms is not None:
+            kex_algs = ', '.join(kex.kex_algorithms)
+        if kex.server.encryption is not None:
+            ciphers = ', '.join(kex.server.encryption)
+        if kex.server.mac is not None:
+            macs = ', '.join(kex.server.mac)
 
         policy_data = '''#
 # Custom policy based on %s (created on %s)
@@ -3327,6 +3335,8 @@ macs = %s
 
 
     def evaluate(self, banner, header, kex):
+        '''Evaluates a server configuration against this policy.  Returns a tuple of a boolean (True if server adheres to policy) and an array of strings that holds error messages.'''
+
         ret = True
         errors = []
 
@@ -3362,6 +3372,7 @@ macs = %s
 
 
     def get_name_and_version(self):
+        '''Returns a string of this Policy's name and version.'''
         return '%s v%s' % (self._name, self._version)
 
 
