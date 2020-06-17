@@ -3338,6 +3338,10 @@ macs = %s
             ret = False
             errors.append('Header did not match. Expected: [%s]; Actual: [%s]' % (self._header, header))
 
+        if (self._compressions is not None) and (kex.server.compression != self._compressions):
+            ret = False
+            errors.append('Compression types did not match. Expected: %s; Actual: %s' % (self._compressions, kex.server.compression))
+
         if (self._host_keys is not None) and (kex.key_algorithms != self._host_keys):
             ret = False
             errors.append('Host key types did not match. Expected: %s; Actual: %s' % (self._host_keys, kex.key_algorithms))

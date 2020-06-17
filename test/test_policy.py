@@ -11,6 +11,26 @@ class TestPolicy:
         self.ssh2 = ssh_audit.SSH2
 
 
+    def _get_kex(self):
+        '''Returns an SSH2.Kex object to simulate a server connection.'''
+
+        w = self.wbuf()
+        w.write(b'\x00\x11\x22\x33\x44\x55\x66\x77\x88\x99\xaa\xbb\xcc\xdd\xee\xff')
+        w.write_list(['kex_alg1', 'kex_alg2'])
+        w.write_list(['key_alg1', 'key_alg2'])
+        w.write_list(['cipher_alg1', 'cipher_alg2', 'cipher_alg3'])
+        w.write_list(['cipher_alg1', 'cipher_alg2', 'cipher_alg3'])
+        w.write_list(['mac_alg1', 'mac_alg2', 'mac_alg3'])
+        w.write_list(['mac_alg1', 'mac_alg2', 'mac_alg3'])
+        w.write_list(['comp_alg1', 'comp_alg2'])
+        w.write_list(['comp_alg1', 'comp_alg2'])
+        w.write_list([''])
+        w.write_list([''])
+        w.write_byte(False)
+        w.write_int(0)
+        return self.ssh2.Kex.parse(w.write_flush())
+
+
     def test_policy_basic(self):
         '''Ensure that a basic policy can be parsed correctly.'''
 
@@ -163,23 +183,9 @@ macs = mac_alg1, mac_alg2, mac_alg3'''
 
 
     def test_policy_create_1(self):
-        '''Creates a policy from a kex and ensures it is generated exactly as expected'''
+        '''Creates a policy from a kex and ensures it is generated exactly as expected.'''
 
-        w = self.wbuf()
-        w.write(b'\x00\x11\x22\x33\x44\x55\x66\x77\x88\x99\xaa\xbb\xcc\xdd\xee\xff')
-        w.write_list(['kex_alg1', 'kex_alg2'])
-        w.write_list(['key_alg1', 'key_alg2'])
-        w.write_list(['cipher_alg1', 'cipher_alg2', 'cipher_alg3'])
-        w.write_list(['cipher_alg1', 'cipher_alg2', 'cipher_alg3'])
-        w.write_list(['mac_alg1', 'mac_alg2', 'mac_alg3'])
-        w.write_list(['mac_alg1', 'mac_alg2', 'mac_alg3'])
-        w.write_list(['comp_alg1', 'comp_alg2'])
-        w.write_list(['comp_alg1', 'comp_alg2'])
-        w.write_list([''])
-        w.write_list([''])
-        w.write_byte(False)
-        w.write_int(0)
-        kex = self.ssh2.Kex.parse(w.write_flush())
+        kex = self._get_kex()
         pol_data = self.Policy.create('www.l0l.com', 'bannerX', 'headerX', kex)
 
         # Today's date is embedded in the policy, so filter it out to get repeatable results.
@@ -189,4 +195,122 @@ macs = mac_alg1, mac_alg2, mac_alg3'''
         assert hashlib.sha256(pol_data.encode('ascii')).hexdigest() == 'e830fb9e5731995e5e4858b2b6d16704d7e5c2769d3a8d9acdd023a83ab337c5'
 
 
-        # Create policy, evaluate against fake kex.
+    def test_policy_evaluate_passing_1(self):
+        '''Creates a policy and evaluates it against a passing server'''
+
+        kex = self._get_kex()
+        policy_data = self.Policy.create('www.l0l.com', None, None, kex)
+        policy = self.Policy(policy_data=policy_data)
+
+        ret, errors = policy.evaluate('SSH Server 1.0', None, kex)
+        assert ret is True
+        assert len(errors) == 0
+
+
+    def test_policy_evaluate_failing_1(self):
+        '''Ensure that a policy with a specified banner fails against a server with a different banner'''
+
+        policy_data = '''name = "Test Policy"
+version = 1
+banner = "XXX mismatched banner XXX"
+compressions = comp_alg1, comp_alg2
+host keys = key_alg1, key_alg2
+key exchanges = kex_alg1, kex_alg2
+ciphers = cipher_alg1, cipher_alg2, cipher_alg3
+macs = mac_alg1, mac_alg2, mac_alg3'''
+
+        policy = self.Policy(policy_data=policy_data)
+        ret, errors = policy.evaluate('SSH Server 1.0', None, self._get_kex())
+        assert ret is False
+        assert len(errors) == 1
+        assert errors[0].find('Banner did not match.') != -1
+
+
+    def test_policy_evaluate_failing_2(self):
+        '''Ensure that a mismatched compressions list results in a failure'''
+
+        policy_data = '''name = "Test Policy"
+version = 1
+compressions = XXXmismatchedXXX, comp_alg1, comp_alg2
+host keys = key_alg1, key_alg2
+key exchanges = kex_alg1, kex_alg2
+ciphers = cipher_alg1, cipher_alg2, cipher_alg3
+macs = mac_alg1, mac_alg2, mac_alg3'''
+
+        policy = self.Policy(policy_data=policy_data)
+        ret, errors = policy.evaluate('SSH Server 1.0', None, self._get_kex())
+        assert ret is False
+        assert len(errors) == 1
+        assert errors[0].find('Compression types did not match.') != -1
+
+
+    def test_policy_evaluate_failing_3(self):
+        '''Ensure that a mismatched host keys results in a failure'''
+
+        policy_data = '''name = "Test Policy"
+version = 1
+compressions = comp_alg1, comp_alg2
+host keys = XXXmismatchedXXX, key_alg1, key_alg2
+key exchanges = kex_alg1, kex_alg2
+ciphers = cipher_alg1, cipher_alg2, cipher_alg3
+macs = mac_alg1, mac_alg2, mac_alg3'''
+
+        policy = self.Policy(policy_data=policy_data)
+        ret, errors = policy.evaluate('SSH Server 1.0', None, self._get_kex())
+        assert ret is False
+        assert len(errors) == 1
+        assert errors[0].find('Host key types did not match.') != -1
+
+
+    def test_policy_evaluate_failing_4(self):
+        '''Ensure that a mismatched key exchange list results in a failure'''
+
+        policy_data = '''name = "Test Policy"
+version = 1
+compressions = comp_alg1, comp_alg2
+host keys = key_alg1, key_alg2
+key exchanges = XXXmismatchedXXX, kex_alg1, kex_alg2
+ciphers = cipher_alg1, cipher_alg2, cipher_alg3
+macs = mac_alg1, mac_alg2, mac_alg3'''
+
+        policy = self.Policy(policy_data=policy_data)
+        ret, errors = policy.evaluate('SSH Server 1.0', None, self._get_kex())
+        assert ret is False
+        assert len(errors) == 1
+        assert errors[0].find('Key exchanges did not match.') != -1
+
+
+    def test_policy_evaluate_failing_5(self):
+        '''Ensure that a mismatched cipher list results in a failure'''
+
+        policy_data = '''name = "Test Policy"
+version = 1
+compressions = comp_alg1, comp_alg2
+host keys = key_alg1, key_alg2
+key exchanges = kex_alg1, kex_alg2
+ciphers = cipher_alg1, XXXmismatched, cipher_alg2, cipher_alg3
+macs = mac_alg1, mac_alg2, mac_alg3'''
+
+        policy = self.Policy(policy_data=policy_data)
+        ret, errors = policy.evaluate('SSH Server 1.0', None, self._get_kex())
+        assert ret is False
+        assert len(errors) == 1
+        assert errors[0].find('Ciphers did not match.') != -1
+
+
+    def test_policy_evaluate_failing_6(self):
+        '''Ensure that a mismatched MAC list results in a failure'''
+
+        policy_data = '''name = "Test Policy"
+version = 1
+compressions = comp_alg1, comp_alg2
+host keys = key_alg1, key_alg2
+key exchanges = kex_alg1, kex_alg2
+ciphers = cipher_alg1, cipher_alg2, cipher_alg3
+macs = mac_alg1, mac_alg2, XXXmismatched, mac_alg3'''
+
+        policy = self.Policy(policy_data=policy_data)
+        ret, errors = policy.evaluate('SSH Server 1.0', None, self._get_kex())
+        assert ret is False
+        assert len(errors) == 1
+        assert errors[0].find('MACs did not match.') != -1
