@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
    The MIT License (MIT)
 
@@ -24,7 +23,6 @@
    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
    THE SOFTWARE.
 """
-from __future__ import print_function
 from datetime import date
 import base64
 import binascii
@@ -40,26 +38,13 @@ import select
 import socket
 import struct
 import sys
-
+# pylint: disable=unused-import
+from typing import Dict, List, Set, Sequence, Tuple, Iterable
+from typing import Callable, Optional, Union, Any
 
 VERSION = 'v2.2.1-dev'
 SSH_HEADER = 'SSH-{0}-OpenSSH_8.0'  # SSH software to impersonate
 
-if sys.version_info >= (3,):  # pragma: nocover
-    StringIO, BytesIO = io.StringIO, io.BytesIO
-    text_type = str
-    binary_type = bytes
-else:  # pragma: nocover
-    import StringIO as _StringIO  # pylint: disable=import-error
-    StringIO = BytesIO = _StringIO.StringIO
-    text_type = unicode  # pylint: disable=undefined-variable  # noqa: F821
-    binary_type = str
-try:  # pragma: nocover
-    # pylint: disable=unused-import
-    from typing import Dict, List, Set, Sequence, Tuple, Iterable
-    from typing import Callable, Optional, Union, Any
-except ImportError:  # pragma: nocover
-    pass
 try:  # pragma: nocover
     from colorama import init as colorama_init
     colorama_init(strip=False)  # pragma: nocover
@@ -71,7 +56,7 @@ def usage(err=None):
     # type: (Optional[str]) -> None
     uout = Output()
     p = os.path.basename(sys.argv[0])
-    uout.head('# {0} {1}, https://github.com/jtesta/ssh-audit\n'.format(p, VERSION))
+    uout.head('# {} {}, https://github.com/jtesta/ssh-audit\n'.format(p, VERSION))
     if err is not None and len(err) > 0:
         uout.fail('\n' + err)
     uout.info('usage: {0} [-h1246ptbcPjlnv] <host>\n'.format(p))
@@ -96,6 +81,230 @@ def usage(err=None):
     sys.exit(1)
 
 
+# Validates policy files and performs policy testing
+class Policy:
+
+    def __init__(self, policy_file=None, policy_data=None):
+        self._name = None
+        self._version = None
+        self._banner = None
+        self._header = None
+        self._compressions = None
+        self._host_keys = None
+        self._kex = None
+        self._ciphers = None
+        self._macs = None
+
+        if (policy_file is None) and (policy_data is None):
+            raise RuntimeError('policy_file and policy_data must not both be None.')
+        elif (policy_file is not None) and (policy_data is not None):
+            raise RuntimeError('policy_file and policy_data must not both be specified.')
+
+        if policy_file is not None:
+            with open(policy_file, "r") as f:
+                policy_data = f.read()
+
+        for line in policy_data.split("\n"):
+            line = line.strip()
+            if (len(line) == 0) or line.startswith('#'):
+                continue
+
+            key = None
+            val = None
+            try:
+                key, val = line.split('=')
+            except ValueError:
+                raise ValueError("could not parse line: %s" % line)
+
+            key = key.strip()
+            val = val.strip()
+
+            if key not in ['name', 'version', 'banner', 'header', 'compressions', 'host keys', 'key exchanges', 'ciphers', 'macs']:
+                raise ValueError("invalid field found in policy: %s" % line)
+
+            if key in ['name', 'banner', 'header']:
+
+                # If the banner value is blank, set it to "" so that the code below handles it.
+                if len(val) < 2:
+                    val = "\"\""
+
+                if (val[0] != '"') or (val[-1] != '"'):
+                    raise ValueError('the value for the %s field must be enclosed in quotes: %s' % (key, val))
+
+                # Remove the surrounding quotes, and unescape quotes & newlines.
+                val = val[1:-1]. replace("\\\"", "\"").replace("\\n", "\n")
+
+                if key == 'name':
+                    self._name = val
+                elif key == 'banner':
+                    self._banner = val
+                else:
+                    self._header = val
+            elif key == 'version':
+                self._version = val
+            elif key in ['compressions', 'host keys', 'key exchanges', 'ciphers', 'macs']:
+                try:
+                    algs = val.split(',')
+                except ValueError:
+                    # If the value has no commas, then set the algorithm list to just the value.
+                    algs = [val]
+
+                # Strip whitespace in each algorithm name.
+                algs = [alg.strip() for alg in algs]
+
+                if key == 'compressions':
+                    self._compressions = algs
+                elif key == 'host keys':
+                    self._host_keys = algs
+                elif key == 'key exchanges':
+                    self._kex = algs
+                elif key == 'ciphers':
+                    self._ciphers = algs
+                elif key == 'macs':
+                    self._macs = algs
+
+        if self._name is None:
+            raise ValueError('The policy does not have a name field.')
+        if self._version is None:
+            raise ValueError('The policy does not have a version field.')
+
+
+    @staticmethod
+    def create(host, banner, header, kex):
+        '''Creates a policy based on a server configuration.  Returns a string.'''
+
+        today = date.today().strftime('%Y/%m/%d')
+        compressions = None
+        host_keys = None
+        kex_algs = None
+        ciphers = None
+        macs = None
+
+        if kex.server.compression is not None:
+            compressions = ', '.join(kex.server.compression)
+        if kex.key_algorithms is not None:
+            host_keys = ', '.join(kex.key_algorithms)
+        if kex.kex_algorithms is not None:
+            kex_algs = ', '.join(kex.kex_algorithms)
+        if kex.server.encryption is not None:
+            ciphers = ', '.join(kex.server.encryption)
+        if kex.server.mac is not None:
+            macs = ', '.join(kex.server.mac)
+
+        policy_data = '''#
+# Custom policy based on %s (created on %s)
+#
+
+# The name of this policy (displayed in the output during scans).  Must be in quotes.
+name = "Custom Policy (based on %s on %s)"
+
+# The version of this policy (displayed in the output during scans).  Not parsed, and may be any value, including strings.
+version = 1
+
+# The banner that must match exactly.  Commented out to ignore banners, since minor variability in the banner is sometimes normal.
+# banner = "%s"
+
+# The header that must match exactly.  Commented out to ignore headers, since variability in the header is sometimes normal.
+# header = "%s"
+
+# The compression options that must match exactly (order matters).  Commented out to ignore by default.
+# compressions = %s
+
+# The host key types that must match exactly (order matters).
+host keys = %s
+
+# The key exchange algorithms that must match exactly (order matters).
+key exchanges = %s
+
+# The ciphers that must match exactly (order matters).
+ciphers = %s
+
+# The MACs that must match exactly (order matters).
+macs = %s
+''' % (host, today, host, today, banner, header, compressions, host_keys, kex_algs, ciphers, macs)
+
+        return policy_data
+
+
+    def evaluate(self, banner, header, kex):
+        '''Evaluates a server configuration against this policy.  Returns a tuple of a boolean (True if server adheres to policy) and an array of strings that holds error messages.'''
+
+        ret = True
+        errors = []
+
+        banner_str = str(banner)
+        if (self._banner is not None) and (banner_str != self._banner):
+            ret = False
+            errors.append('Banner did not match. Expected: [%s]; Actual: [%s]' % (self._banner, banner_str))
+
+        if (self._header is not None) and (header != self._header):
+            ret = False
+            errors.append('Header did not match. Expected: [%s]; Actual: [%s]' % (self._header, header))
+
+        if (self._compressions is not None) and (kex.server.compression != self._compressions):
+            ret = False
+            errors.append('Compression types did not match. Expected: %s; Actual: %s' % (self._compressions, kex.server.compression))
+
+        if (self._host_keys is not None) and (kex.key_algorithms != self._host_keys):
+            ret = False
+            errors.append('Host key types did not match. Expected: %s; Actual: %s' % (self._host_keys, kex.key_algorithms))
+
+        if (self._kex is not None) and (kex.kex_algorithms != self._kex):
+            ret = False
+            errors.append('Key exchanges did not match. Expected: %s; Actual: %s' % (self._kex, kex.kex_algorithms))
+
+        if (self._ciphers is not None) and (kex.server.encryption != self._ciphers):
+            ret = False
+            errors.append('Ciphers did not match. Expected: %s; Actual: %s' % (self._ciphers, kex.server.encryption))
+
+        if (self._macs is not None) and (kex.server.mac != self._macs):
+            ret = False
+            errors.append('MACs did not match. Expected: %s; Actual: %s' % (self._macs, kex.server.mac))
+
+        return ret, errors
+
+
+    def get_name_and_version(self):
+        '''Returns a string of this Policy's name and version.'''
+        return '%s v%s' % (self._name, self._version)
+
+
+    def __str__(self):
+        undefined = '{undefined}'
+
+        name = undefined
+        version = undefined
+        banner = undefined
+        header = undefined
+        compressions_str = undefined
+        host_keys_str = undefined
+        kex_str = undefined
+        ciphers_str = undefined
+        macs_str = undefined
+
+        if self._name is not None:
+            name = '[%s]' % self._name
+        if self._version is not None:
+            version = '[%s]' % self._version
+        if self._banner is not None:
+            banner = '[%s]' % self._banner
+        if self._header is not None:
+            header = '[%s]' % self._header
+
+        if self._compressions is not None:
+            compressions_str = ', '.join(self._compressions)
+        if self._host_keys is not None:
+            host_keys_str = ', '.join(self._host_keys)
+        if self._kex is not None:
+            kex_str = ', '.join(self._kex)
+        if self._ciphers is not None:
+            ciphers_str = ', '.join(self._ciphers)
+        if self._macs is not None:
+            macs_str = ', '.join(self._macs)
+
+        return "Name: %s\nVersion: %s\nBanner: %s\nHeader: %s\nCompressions: %s\nHost Keys: %s\nKey Exchanges: %s\nCiphers: %s\nMACs: %s" % (name, version, banner, header, compressions_str, host_keys_str, kex_str, ciphers_str, macs_str)
+
+
 class AuditConf:
     # pylint: disable=too-many-instance-attributes
     def __init__(self, host=None, port=22):
@@ -114,13 +323,13 @@ class AuditConf:
         self.ipv4 = False
         self.ipv6 = False
         self.make_policy = False  # When True, creates a policy file from an audit scan.
-        self.policy_file = None  # File system path to a policy
-        self.policy = None  # Policy object
+        self.policy_file = None   # type: Optional[str]  # File system path to a policy
+        self.policy = None  # type: Optional[Policy]  # Policy object
         self.timeout = 5.0
         self.timeout_set = False  # Set to True when the user explicitly sets it.
 
     def __setattr__(self, name, value):
-        # type: (str, Union[str, int, bool, Sequence[int]]) -> None
+        # type: (str, Union[str, int, float, bool, Sequence[int]]) -> None
         valid = False
         if name in ['ssh1', 'ssh2', 'batch', 'client_audit', 'colors', 'verbose', 'timeout_set', 'json', 'make_policy']:
             valid, value = True, bool(value)
@@ -147,18 +356,18 @@ class AuditConf:
         elif name == 'port':
             valid, port = True, utils.parse_int(value)
             if port < 1 or port > 65535:
-                raise ValueError('invalid port: {0}'.format(value))
+                raise ValueError('invalid port: {}'.format(value))
             value = port
         elif name in ['level']:
             if value not in ('info', 'warn', 'fail'):
-                raise ValueError('invalid level: {0}'.format(value))
+                raise ValueError('invalid level: {}'.format(value))
             valid = True
         elif name == 'host':
             valid = True
         elif name == 'timeout':
             value = utils.parse_float(value)
             if value == -1.0:
-                raise ValueError('invalid timeout: {0}'.format(value))
+                raise ValueError('invalid timeout: {}'.format(value))
             valid = True
         elif name in ['policy_file', 'policy']:
             valid = True
@@ -205,7 +414,7 @@ class AuditConf:
                 aconf.verbose = True
             elif o in ('-l', '--level'):
                 if a not in ('info', 'warn', 'fail'):
-                    usage_cb('level {0} is not valid'.format(a))
+                    usage_cb('level {} is not valid'.format(a))
                 aconf.level = a
             elif o in ('-t', '--timeout'):
                 aconf.timeout = float(a)
@@ -219,10 +428,10 @@ class AuditConf:
             usage_cb()
         if aconf.client_audit is False:
             if oport is not None:
-                host = args[0]
+                host = args[0]  # type: Optional[str]
             else:
                 mx = re.match(r'^\[([^\]]+)\](?::(.*))?$', args[0])
-                if bool(mx):
+                if mx is not None:
                     host, oport = mx.group(1), mx.group(2)
                 else:
                     s = args[0].split(':')
@@ -238,7 +447,7 @@ class AuditConf:
                 oport = '2222'
         port = utils.parse_int(oport)
         if port <= 0 or port > 65535:
-            usage_cb('port {0} is not valid'.format(oport))
+            usage_cb('port {} is not valid'.format(oport))
         aconf.host = host
         aconf.port = port
         if not (aconf.ssh1 or aconf.ssh2):
@@ -299,33 +508,33 @@ class Output:
 
     @staticmethod
     def _colorized(color):
-        # type: (str) -> Callable[[text_type], None]
-        return lambda x: print(u'{0}{1}\033[0m'.format(color, x))
+        # type: (str) -> Callable[[str], None]
+        return lambda x: print(u'{}{}\033[0m'.format(color, x))
 
     def __getattr__(self, name):
-        # type: (str) -> Callable[[text_type], None]
+        # type: (str) -> Callable[[str], None]
         if name == 'head' and self.batch:
             return lambda x: None
         if not self.get_level(name) >= self.__level:
             return lambda x: None
         if self.use_colors and self.colors_supported and name in self.COLORS:
-            color = '\033[0;{0}m'.format(self.COLORS[name])
+            color = '\033[0;{}m'.format(self.COLORS[name])
             return self._colorized(color)
         else:
-            return lambda x: print(u'{0}'.format(x))
+            return lambda x: print(u'{}'.format(x))
 
 
 class OutputBuffer(list):
     def __enter__(self):
         # type: () -> OutputBuffer
         # pylint: disable=attribute-defined-outside-init
-        self.__buf = StringIO()
+        self.__buf = io.StringIO()
         self.__stdout = sys.stdout
         sys.stdout = self.__buf
         return self
 
     def flush(self, sort_lines=False):
-        # type: () -> None
+        # type: (bool) -> None
         # Lines must be sorted in some cases to ensure consistent testing.
         if sort_lines:
             self.sort()
@@ -560,7 +769,7 @@ class SSH2:  # pylint: disable=too-few-public-methods
 
     class KexParty:
         def __init__(self, enc, mac, compression, languages):
-            # type: (List[text_type], List[text_type], List[text_type], List[text_type]) -> None
+            # type: (List[str], List[str], List[str], List[str]) -> None
             self.__enc = enc
             self.__mac = mac
             self.__compression = compression
@@ -568,27 +777,27 @@ class SSH2:  # pylint: disable=too-few-public-methods
 
         @property
         def encryption(self):
-            # type: () -> List[text_type]
+            # type: () -> List[str]
             return self.__enc
 
         @property
         def mac(self):
-            # type: () -> List[text_type]
+            # type: () -> List[str]
             return self.__mac
 
         @property
         def compression(self):
-            # type: () -> List[text_type]
+            # type: () -> List[str]
             return self.__compression
 
         @property
         def languages(self):
-            # type: () -> List[text_type]
+            # type: () -> List[str]
             return self.__languages
 
     class Kex:
         def __init__(self, cookie, kex_algs, key_algs, cli, srv, follows, unused=0):
-            # type: (binary_type, List[text_type], List[text_type], SSH2.KexParty, SSH2.KexParty, bool, int) -> None
+            # type: (bytes, List[str], List[str], SSH2.KexParty, SSH2.KexParty, bool, int) -> None
             self.__cookie = cookie
             self.__kex_algs = kex_algs
             self.__key_algs = key_algs
@@ -597,23 +806,23 @@ class SSH2:  # pylint: disable=too-few-public-methods
             self.__follows = follows
             self.__unused = unused
 
-            self.__rsa_key_sizes = {}
-            self.__dh_modulus_sizes = {}
-            self.__host_keys = {}
+            self.__rsa_key_sizes = {}  # type: Dict[str, Tuple[int, int]]
+            self.__dh_modulus_sizes = {}  # type: Dict[str, Tuple[int, int]]
+            self.__host_keys = {}  # type: Dict[str, bytes]
 
         @property
         def cookie(self):
-            # type: () -> binary_type
+            # type: () -> bytes
             return self.__cookie
 
         @property
         def kex_algorithms(self):
-            # type: () -> List[text_type]
+            # type: () -> List[str]
             return self.__kex_algs
 
         @property
         def key_algorithms(self):
-            # type: () -> List[text_type]
+            # type: () -> List[str]
             return self.__key_algs
 
         # client_to_server
@@ -674,14 +883,14 @@ class SSH2:  # pylint: disable=too-few-public-methods
 
         @property
         def payload(self):
-            # type: () -> binary_type
+            # type: () -> bytes
             wbuf = WriteBuf()
             self.write(wbuf)
             return wbuf.write_flush()
 
         @classmethod
         def parse(cls, payload):
-            # type: (binary_type) -> SSH2.Kex
+            # type: (bytes) -> SSH2.Kex
             buf = ReadBuf(payload)
             cookie = buf.read(16)
             kex_algs = buf.read_list()
@@ -967,7 +1176,7 @@ class SSH1:
                 self._table[i] = crc
 
         def calc(self, v):
-            # type: (binary_type) -> int
+            # type: (bytes) -> int
             crc, length = 0, len(v)
             for i in range(length):
                 n = ord(v[i:i + 1])
@@ -981,7 +1190,7 @@ class SSH1:
 
     @classmethod
     def crc32(cls, v):
-        # type: (binary_type) -> int
+        # type: (bytes) -> int
         if cls._crc32 is None:
             cls._crc32 = cls.CRC32()
         return cls._crc32.calc(v)
@@ -1019,11 +1228,11 @@ class SSH1:
 
     class PublicKeyMessage:
         def __init__(self, cookie, skey, hkey, pflags, cmask, amask):
-            # type: (binary_type, Tuple[int, int, int], Tuple[int, int, int], int, int, int) -> None
+            # type: (bytes, Tuple[int, int, int], Tuple[int, int, int], int, int, int) -> None
             if len(skey) != 3:
-                raise ValueError('invalid server key pair: {0}'.format(skey))
+                raise ValueError('invalid server key pair: {}'.format(skey))
             if len(hkey) != 3:
-                raise ValueError('invalid host key pair: {0}'.format(hkey))
+                raise ValueError('invalid host key pair: {}'.format(hkey))
             self.__cookie = cookie
             self.__server_key = skey
             self.__host_key = hkey
@@ -1033,7 +1242,7 @@ class SSH1:
 
         @property
         def cookie(self):
-            # type: () -> binary_type
+            # type: () -> bytes
             return self.__cookie
 
         @property
@@ -1068,7 +1277,7 @@ class SSH1:
 
         @property
         def host_key_fingerprint_data(self):
-            # type: () -> binary_type
+            # type: () -> bytes
             # pylint: disable=protected-access
             mod = WriteBuf._create_mpint(self.host_key_public_modulus, False)
             e = WriteBuf._create_mpint(self.host_key_public_exponent, False)
@@ -1086,11 +1295,11 @@ class SSH1:
 
         @property
         def supported_ciphers(self):
-            # type: () -> List[text_type]
+            # type: () -> List[str]
             ciphers = []
             for i in range(len(SSH1.CIPHERS)):
                 if self.__supported_ciphers_mask & (1 << i) != 0:
-                    ciphers.append(utils.to_utext(SSH1.CIPHERS[i]))
+                    ciphers.append(utils.to_text(SSH1.CIPHERS[i]))
             return ciphers
 
         @property
@@ -1100,11 +1309,11 @@ class SSH1:
 
         @property
         def supported_authentications(self):
-            # type: () -> List[text_type]
+            # type: () -> List[str]
             auths = []
             for i in range(1, len(SSH1.AUTHS)):
                 if self.__supported_authentications_mask & (1 << i) != 0:
-                    auths.append(utils.to_utext(SSH1.AUTHS[i]))
+                    auths.append(utils.to_text(SSH1.AUTHS[i]))
             return auths
 
         def write(self, wbuf):
@@ -1122,14 +1331,14 @@ class SSH1:
 
         @property
         def payload(self):
-            # type: () -> binary_type
+            # type: () -> bytes
             wbuf = WriteBuf()
             self.write(wbuf)
             return wbuf.write_flush()
 
         @classmethod
         def parse(cls, payload):
-            # type: (binary_type) -> SSH1.PublicKeyMessage
+            # type: (bytes) -> SSH1.PublicKeyMessage
             buf = ReadBuf(payload)
             cookie = buf.read(8)
             server_key_bits = buf.read_int()
@@ -1149,9 +1358,9 @@ class SSH1:
 
 class ReadBuf:
     def __init__(self, data=None):
-        # type: (Optional[binary_type]) -> None
+        # type: (Optional[bytes]) -> None
         super(ReadBuf, self).__init__()
-        self._buf = BytesIO(data) if data is not None else BytesIO()
+        self._buf = io.BytesIO(data) if data is not None else io.BytesIO()
         self._len = len(data) if data is not None else 0
 
     @property
@@ -1160,7 +1369,7 @@ class ReadBuf:
         return self._len - self._buf.tell()
 
     def read(self, size):
-        # type: (int) -> binary_type
+        # type: (int) -> bytes
         return self._buf.read(size)
 
     def read_byte(self):
@@ -1178,18 +1387,18 @@ class ReadBuf:
         return v
 
     def read_list(self):
-        # type: () -> List[text_type]
+        # type: () -> List[str]
         list_size = self.read_int()
         return self.read(list_size).decode('utf-8', 'replace').split(',')
 
     def read_string(self):
-        # type: () -> binary_type
+        # type: () -> bytes
         n = self.read_int()
         return self.read(n)
 
     @classmethod
     def _parse_mpint(cls, v, pad, f):
-        # type: (binary_type, binary_type, str) -> int
+        # type: (bytes, bytes, str) -> int
         r = 0
         if len(v) % 4 != 0:
             v = pad * (4 - (len(v) % 4)) + v
@@ -1214,22 +1423,22 @@ class ReadBuf:
         return self._parse_mpint(v, pad, f)
 
     def read_line(self):
-        # type: () -> text_type
+        # type: () -> str
         return self._buf.readline().rstrip().decode('utf-8', 'replace')
 
     def reset(self):
-        self._buf = BytesIO()
+        self._buf = io.BytesIO()
         self._len = 0
 
 
 class WriteBuf:
     def __init__(self, data=None):
-        # type: (Optional[binary_type]) -> None
+        # type: (Optional[bytes]) -> None
         super(WriteBuf, self).__init__()
-        self._wbuf = BytesIO(data) if data is not None else BytesIO()
+        self._wbuf = io.BytesIO(data) if data is not None else io.BytesIO()
 
     def write(self, data):
-        # type: (binary_type) -> WriteBuf
+        # type: (bytes) -> WriteBuf
         self._wbuf.write(data)
         return self
 
@@ -1246,14 +1455,14 @@ class WriteBuf:
         return self.write(struct.pack('>I', v))
 
     def write_string(self, v):
-        # type: (Union[binary_type, text_type]) -> WriteBuf
+        # type: (Union[bytes, str]) -> WriteBuf
         if not isinstance(v, bytes):
             v = bytes(bytearray(v, 'utf-8'))
         self.write_int(len(v))
         return self.write(v)
 
     def write_list(self, v):
-        # type: (List[text_type]) -> WriteBuf
+        # type: (List[str]) -> WriteBuf
         return self.write_string(u','.join(v))
 
     @classmethod
@@ -1266,12 +1475,12 @@ class WriteBuf:
 
     @classmethod
     def _create_mpint(cls, n, signed=True, bits=None):
-        # type: (int, bool, Optional[int]) -> binary_type
+        # type: (int, bool, Optional[int]) -> bytes
         if bits is None:
             bits = cls._bitlength(n)
         length = bits // 8 + (1 if n != 0 else 0)
         ql = (length + 7) // 8
-        fmt, v2 = '>{0}Q'.format(ql), [0] * ql
+        fmt, v2 = '>{}Q'.format(ql), [0] * ql
         for i in range(ql):
             v2[ql - i - 1] = n & 0xffffffffffffffff
             n >>= 64
@@ -1297,21 +1506,21 @@ class WriteBuf:
         return self.write_string(data)
 
     def write_line(self, v):
-        # type: (Union[binary_type, str]) -> WriteBuf
+        # type: (Union[bytes, str]) -> WriteBuf
         if not isinstance(v, bytes):
             v = bytes(bytearray(v, 'utf-8'))
         v += b'\r\n'
         return self.write(v)
 
     def write_flush(self):
-        # type: () -> binary_type
+        # type: () -> bytes
         payload = self._wbuf.getvalue()
         self._wbuf.truncate(0)
         self._wbuf.seek(0)
         return payload
 
     def reset(self):
-        self._wbuf = BytesIO()
+        self._wbuf = io.BytesIO()
 
 
 class SSH:  # pylint: disable=too-few-public-methods
@@ -1370,16 +1579,16 @@ class SSH:  # pylint: disable=too-few-public-methods
             return self.__os
 
         def compare_version(self, other):
-            # type: (Union[None, SSH.Software, text_type]) -> int
+            # type: (Union[None, SSH.Software, str]) -> int
             # pylint: disable=too-many-branches
             if other is None:
                 return 1
             if isinstance(other, SSH.Software):
-                other = '{0}{1}'.format(other.version, other.patch or '')
+                other = '{}{}'.format(other.version, other.patch or '')
             else:
                 other = str(other)
             mx = re.match(r'^([\d\.]+\d+)(.*)$', other)
-            if bool(mx):
+            if mx is not None:
                 oversion, opatch = mx.group(1), mx.group(2).strip()
             else:
                 oversion, opatch = other, ''
@@ -1390,16 +1599,16 @@ class SSH:  # pylint: disable=too-few-public-methods
             spatch = self.patch or ''
             if self.product == SSH.Product.DropbearSSH:
                 if not re.match(r'^test\d.*$', opatch):
-                    opatch = 'z{0}'.format(opatch)
+                    opatch = 'z{}'.format(opatch)
                 if not re.match(r'^test\d.*$', spatch):
-                    spatch = 'z{0}'.format(spatch)
+                    spatch = 'z{}'.format(spatch)
             elif self.product == SSH.Product.OpenSSH:
                 mx1 = re.match(r'^p\d(.*)', opatch)
                 mx2 = re.match(r'^p\d(.*)', spatch)
                 if not (bool(mx1) and bool(mx2)):
-                    if bool(mx1):
+                    if mx1 is not None:
                         opatch = mx1.group(1)
-                    if bool(mx2):
+                    if mx2 is not None:
                         spatch = mx2.group(1)
             if spatch < opatch:
                 return -1
@@ -1417,21 +1626,21 @@ class SSH:  # pylint: disable=too-few-public-methods
 
         def display(self, full=True):
             # type: (bool) -> str
-            r = '{0} '.format(self.vendor) if bool(self.vendor) else ''
+            r = '{} '.format(self.vendor) if bool(self.vendor) else ''
             r += self.product
             if bool(self.version):
-                r += ' {0}'.format(self.version)
+                r += ' {}'.format(self.version)
             if full:
                 patch = self.patch or ''
                 if self.product == SSH.Product.OpenSSH:
                     mx = re.match(r'^(p\d)(.*)$', patch)
-                    if bool(mx):
+                    if mx is not None:
                         r += mx.group(1)
                         patch = mx.group(2).strip()
                 if bool(patch):
-                    r += ' ({0})'.format(patch)
+                    r += ' ({})'.format(patch)
                 if bool(self.os):
-                    r += ' running on {0}'.format(self.os)
+                    r += ' running on {}'.format(self.os)
             return r
 
         def __str__(self):
@@ -1440,15 +1649,15 @@ class SSH:  # pylint: disable=too-few-public-methods
 
         def __repr__(self):
             # type: () -> str
-            r = 'vendor={0}, '.format(self.vendor) if bool(self.vendor) else ''
-            r += 'product={0}'.format(self.product)
+            r = 'vendor={}, '.format(self.vendor) if bool(self.vendor) else ''
+            r += 'product={}'.format(self.product)
             if bool(self.version):
-                r += ', version={0}'.format(self.version)
+                r += ', version={}'.format(self.version)
             if bool(self.patch):
-                r += ', patch={0}'.format(self.patch)
+                r += ', patch={}'.format(self.patch)
             if bool(self.os):
-                r += ', os={0}'.format(self.os)
-            return '<{0}({1})>'.format(self.__class__.__name__, r)
+                r += ', os={}'.format(self.os)
+            return '<{}({})>'.format(self.__class__.__name__, r)
 
         @staticmethod
         def _fix_patch(patch):
@@ -1459,7 +1668,7 @@ class SSH:  # pylint: disable=too-few-public-methods
         def _fix_date(d):
             # type: (str) -> Optional[str]
             if d is not None and len(d) == 8:
-                return '{0}-{1}-{2}'.format(d[:4], d[4:6], d[6:8])
+                return '{}-{}-{}'.format(d[:4], d[4:6], d[6:8])
             else:
                 return None
 
@@ -1469,21 +1678,21 @@ class SSH:  # pylint: disable=too-few-public-methods
             if c is None:
                 return None
             mx = re.match(r'^NetBSD(?:_Secure_Shell)?(?:[\s-]+(\d{8})(.*))?$', c)
-            if bool(mx):
+            if mx is not None:
                 d = cls._fix_date(mx.group(1))
-                return 'NetBSD' if d is None else 'NetBSD ({0})'.format(d)
+                return 'NetBSD' if d is None else 'NetBSD ({})'.format(d)
             mx = re.match(r'^FreeBSD(?:\slocalisations)?[\s-]+(\d{8})(.*)$', c)
             if not bool(mx):
                 mx = re.match(r'^[^@]+@FreeBSD\.org[\s-]+(\d{8})(.*)$', c)
-            if bool(mx):
+            if mx is not None:
                 d = cls._fix_date(mx.group(1))
-                return 'FreeBSD' if d is None else 'FreeBSD ({0})'.format(d)
+                return 'FreeBSD' if d is None else 'FreeBSD ({})'.format(d)
             w = ['RemotelyAnywhere', 'DesktopAuthority', 'RemoteSupportManager']
             for win_soft in w:
                 mx = re.match(r'^in ' + win_soft + r' ([\d\.]+\d)$', c)
-                if bool(mx):
+                if mx is not None:
                     ver = mx.group(1)
-                    return 'Microsoft Windows ({0} {1})'.format(win_soft, ver)
+                    return 'Microsoft Windows ({} {})'.format(win_soft, ver)
             generic = ['NetBSD', 'FreeBSD']
             for g in generic:
                 if c.startswith(g) or c.endswith(g):
@@ -1497,48 +1706,48 @@ class SSH:  # pylint: disable=too-few-public-methods
             software = str(banner.software)
             mx = re.match(r'^dropbear_([\d\.]+\d+)(.*)', software)
             v = None  # type: Optional[str]
-            if bool(mx):
+            if mx is not None:
                 patch = cls._fix_patch(mx.group(2))
                 v, p = 'Matt Johnston', SSH.Product.DropbearSSH
                 v = None
                 return cls(v, p, mx.group(1), patch, None)
             mx = re.match(r'^OpenSSH[_\.-]+([\d\.]+\d+)(.*)', software)
-            if bool(mx):
+            if mx is not None:
                 patch = cls._fix_patch(mx.group(2))
                 v, p = 'OpenBSD', SSH.Product.OpenSSH
                 v = None
                 os_version = cls._extract_os_version(banner.comments)
                 return cls(v, p, mx.group(1), patch, os_version)
             mx = re.match(r'^libssh-([\d\.]+\d+)(.*)', software)
-            if bool(mx):
+            if mx is not None:
                 patch = cls._fix_patch(mx.group(2))
                 v, p = None, SSH.Product.LibSSH
                 os_version = cls._extract_os_version(banner.comments)
                 return cls(v, p, mx.group(1), patch, os_version)
             mx = re.match(r'^libssh_([\d\.]+\d+)(.*)', software)
-            if bool(mx):
+            if mx is not None:
                 patch = cls._fix_patch(mx.group(2))
                 v, p = None, SSH.Product.LibSSH
                 os_version = cls._extract_os_version(banner.comments)
                 return cls(v, p, mx.group(1), patch, os_version)
             mx = re.match(r'^RomSShell_([\d\.]+\d+)(.*)', software)
-            if bool(mx):
+            if mx is not None:
                 patch = cls._fix_patch(mx.group(2))
                 v, p = 'Allegro Software', 'RomSShell'
                 return cls(v, p, mx.group(1), patch, None)
             mx = re.match(r'^mpSSH_([\d\.]+\d+)', software)
-            if bool(mx):
+            if mx is not None:
                 v, p = 'HP', 'iLO (Integrated Lights-Out) sshd'
                 return cls(v, p, mx.group(1), None, None)
             mx = re.match(r'^Cisco-([\d\.]+\d+)', software)
-            if bool(mx):
+            if mx is not None:
                 v, p = 'Cisco', 'IOS/PIX sshd'
                 return cls(v, p, mx.group(1), None, None)
             mx = re.match(r'^tinyssh_(.*)', software)
-            if bool(mx):
+            if mx is not None:
                 return cls(None, SSH.Product.TinySSH, mx.group(1), None, None)
             mx = re.match(r'^PuTTY_Release_(.*)', software)
-            if bool(mx):
+            if mx:
                 return cls(None, SSH.Product.PuTTY, mx.group(1), None, None)
             return None
 
@@ -1576,30 +1785,30 @@ class SSH:  # pylint: disable=too-few-public-methods
 
         def __str__(self):
             # type: () -> str
-            r = 'SSH-{0}.{1}'.format(self.protocol[0], self.protocol[1])
+            r = 'SSH-{}.{}'.format(self.protocol[0], self.protocol[1])
             if self.software is not None:
-                r += '-{0}'.format(self.software)
+                r += '-{}'.format(self.software)
             if bool(self.comments):
-                r += ' {0}'.format(self.comments)
+                r += ' {}'.format(self.comments)
             return r
 
         def __repr__(self):
             # type: () -> str
-            p = '{0}.{1}'.format(self.protocol[0], self.protocol[1])
-            r = 'protocol={0}'.format(p)
+            p = '{}.{}'.format(self.protocol[0], self.protocol[1])
+            r = 'protocol={}'.format(p)
             if self.software is not None:
-                r += ', software={0}'.format(self.software)
+                r += ', software={}'.format(self.software)
             if bool(self.comments):
-                r += ', comments={0}'.format(self.comments)
-            return '<{0}({1})>'.format(self.__class__.__name__, r)
+                r += ', comments={}'.format(self.comments)
+            return '<{}({})>'.format(self.__class__.__name__, r)
 
         @classmethod
         def parse(cls, banner):
-            # type: (text_type) -> Optional[SSH.Banner]
+            # type: (str) -> Optional[SSH.Banner]
             valid_ascii = utils.is_print_ascii(banner)
             ascii_banner = utils.to_print_ascii(banner)
             mx = cls.RX_BANNER.match(ascii_banner)
-            if not bool(mx):
+            if mx is None:
                 return None
             protocol = min(re.findall(cls.RX_PROTOCOL, mx.group(1)))
             protocol = (int(protocol[0]), int(protocol[1]))
@@ -1613,22 +1822,22 @@ class SSH:  # pylint: disable=too-few-public-methods
 
     class Fingerprint:
         def __init__(self, fpd):
-            # type: (binary_type) -> None
+            # type: (bytes) -> None
             self.__fpd = fpd
 
         @property
         def md5(self):
-            # type: () -> text_type
+            # type: () -> str
             h = hashlib.md5(self.__fpd).hexdigest()
             r = u':'.join(h[i:i + 2] for i in range(0, len(h), 2))
-            return u'MD5:{0}'.format(r)
+            return u'MD5:{}'.format(r)
 
         @property
         def sha256(self):
-            # type: () -> text_type
+            # type: () -> str
             h = base64.b64encode(hashlib.sha256(self.__fpd).digest())
             r = h.decode('ascii').rstrip('=')
-            return u'SHA256:{0}'.format(r)
+            return u'SHA256:{}'.format(r)
 
     class Algorithm:
         class Timeframe:
@@ -1703,7 +1912,7 @@ class SSH:  # pylint: disable=too-few-public-methods
 
         @classmethod
         def get_since_text(cls, versions):
-            # type: (List[Optional[str]]) -> Optional[text_type]
+            # type: (List[Optional[str]]) -> Optional[str]
             tv = []
             if len(versions) == 0 or versions[0] is None:
                 return None
@@ -1714,8 +1923,8 @@ class SSH:  # pylint: disable=too-few-public-methods
                 if ssh_prod in [SSH.Product.LibSSH]:
                     continue
                 if is_cli:
-                    ssh_ver = '{0} (client only)'.format(ssh_ver)
-                tv.append('{0} {1}'.format(ssh_prod, ssh_ver))
+                    ssh_ver = '{} (client only)'.format(ssh_ver)
+                tv.append('{} {}'.format(ssh_prod, ssh_ver))
             if len(tv) == 0:
                 return None
             return 'available since ' + ', '.join(tv).rstrip(', ')
@@ -1770,7 +1979,7 @@ class SSH:  # pylint: disable=too-few-public-methods
         def maxlen(self):
             # type: () -> int
             def _ml(items):
-                # type: (Sequence[text_type]) -> int
+                # type: (Sequence[str]) -> int
                 return max(len(i) for i in items)
             maxlen = 0
             if self.ssh1kex is not None:
@@ -1792,7 +2001,7 @@ class SSH:  # pylint: disable=too-few-public-methods
                 alg_db = alg_pair.db
                 for alg_type, alg_list in alg_pair.items():
                     for alg_name in alg_list:
-                        alg_name_native = utils.to_ntext(alg_name)
+                        alg_name_native = utils.to_text(alg_name)
                         alg_desc = alg_db[alg_type].get(alg_name_native)
                         if alg_desc is None:
                             continue
@@ -1839,7 +2048,7 @@ class SSH:  # pylint: disable=too-few-public-methods
                         empty_version = False
                         if len(versions) == 0 or versions[0] is None:
                             empty_version = True
-                        if not empty_version:
+                        else:
                             matches = False
                             if unknown_software:
                                 matches = True
@@ -1912,7 +2121,7 @@ class SSH:  # pylint: disable=too-few-public-methods
                 # type: (int, Dict[str, Dict[str, List[List[Optional[str]]]]]) -> None
                 self.__sshv = sshv
                 self.__db = db
-                self.__storage = {}  # type: Dict[str, List[text_type]]
+                self.__storage = {}  # type: Dict[str, List[str]]
 
             @property
             def sshv(self):
@@ -1925,11 +2134,11 @@ class SSH:  # pylint: disable=too-few-public-methods
                 return self.__db
 
             def add(self, key, value):
-                # type: (str, List[text_type]) -> None
+                # type: (str, List[str]) -> None
                 self.__storage[key] = value
 
             def items(self):
-                # type: () -> Iterable[Tuple[str, List[text_type]]]
+                # type: () -> Iterable[Tuple[str, List[str]]]
                 return self.__storage.items()
 
     class Security:  # pylint: disable=too-few-public-methods
@@ -2061,19 +2270,19 @@ class SSH:  # pylint: disable=too-few-public-methods
         SM_BANNER_SENT = 1
 
         def __init__(self, host, port, ipvo=None, timeout=5, timeout_set=False):
-            # type: (Optional[str], int) -> None
+            # type: (Optional[str], int, Optional[Sequence[int]], Union[int,float], bool) -> None
             super(SSH.Socket, self).__init__()
             self.__sock = None  # type: Optional[socket.socket]
-            self.__sock_map = {}
+            self.__sock_map = {}  # type: Dict[int, socket.socket]
             self.__block_size = 8
             self.__state = 0
-            self.__header = []  # type: List[text_type]
+            self.__header = []  # type: List[str]
             self.__banner = None  # type: Optional[SSH.Banner]
             if host is None:
                 raise ValueError('undefined host')
             nport = utils.parse_int(port)
             if nport < 1 or nport > 65535:
-                raise ValueError('invalid port: {0}'.format(port))
+                raise ValueError('invalid port: {}'.format(port))
             self.__host = host
             self.__port = nport
             if ipvo is not None:
@@ -2105,7 +2314,7 @@ class SSH:  # pylint: disable=too-few-public-methods
                     if not check or socktype == socket.SOCK_STREAM:
                         yield af, addr
             except socket.error as e:
-                out.fail('[exception] {0}'.format(e))
+                out.fail('[exception] {}'.format(e))
                 sys.exit(1)
 
         # Listens on a server socket and accepts one connection (used for
@@ -2178,15 +2387,15 @@ class SSH:  # pylint: disable=too-few-public-methods
                     err = e
                     self._close_socket(s)
             if err is None:
-                errm = 'host {0} has no DNS records'.format(self.__host)
+                errm = 'host {} has no DNS records'.format(self.__host)
             else:
                 errt = (self.__host, self.__port, err)
-                errm = 'cannot connect to {0} port {1}: {2}'.format(*errt)
-            out.fail('[exception] {0}'.format(errm))
+                errm = 'cannot connect to {} port {}: {}'.format(*errt)
+            out.fail('[exception] {}'.format(errm))
             sys.exit(1)
 
         def get_banner(self, sshv=2):
-            # type: (int) -> Tuple[Optional[SSH.Banner], List[text_type], Optional[str]]
+            # type: (int) -> Tuple[Optional[SSH.Banner], List[str], Optional[str]]
             if self.__sock is None:
                 return self.__banner, self.__header, 'not connected'
             banner = SSH_HEADER.format('1.5' if sshv == 1 else '2.0')
@@ -2238,7 +2447,7 @@ class SSH:  # pylint: disable=too-few-public-methods
             return len(data), None
 
         def send(self, data):
-            # type: (binary_type) -> Tuple[int, Optional[str]]
+            # type: (bytes) -> Tuple[int, Optional[str]]
             if self.__sock is None:
                 return -1, 'not connected'
             try:
@@ -2262,7 +2471,7 @@ class SSH:  # pylint: disable=too-few-public-methods
                     raise SSH.Socket.InsufficientReadException(e)
 
         def read_packet(self, sshv=2):
-            # type: (int) -> Tuple[int, binary_type]
+            # type: (int) -> Tuple[int, bytes]
             try:
                 header = WriteBuf()
                 self.ensure_read(4)
@@ -2358,7 +2567,7 @@ class SSH:  # pylint: disable=too-few-public-methods
 
 class KexDH:  # pragma: nocover
     def __init__(self, kex_name, hash_alg, g, p):
-        # type: (str, int, int) -> None
+        # type: (str, str, int, int) -> None
         self.__kex_name = kex_name
         self.__hash_alg = hash_alg
         self.__g = 0
@@ -2385,7 +2594,7 @@ class KexDH:  # pragma: nocover
         self.__e = 0
 
     def send_init(self, s, init_msg=SSH.Protocol.MSG_KEXDH_INIT):
-        # type: (SSH.Socket) -> None
+        # type: (SSH.Socket, int) -> None
         r = random.SystemRandom()
         self.__x = r.randrange(2, self.__q)
         self.__e = pow(self.__g, self.__x, self.__p)
@@ -2551,7 +2760,7 @@ class KexGroup1(KexDH):  # pragma: nocover
 
 class KexGroup14(KexDH):  # pragma: nocover
     def __init__(self, hash_alg):
-        # type: () -> None
+        # type: (str) -> None
         # rfc3526: 2048-bit modp group
         p = int('ffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f14374fe1356d6d51c245e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7edee386bfb5a899fa5ae9f24117c4b1fe649286651ece45b3dc2007cb8a163bf0598da48361c55d39a69163fa8fd24cf5f83655d23dca3ad961c62f356208552bb9ed529077096966d670c354e4abc9804f1746c08ca18217c32905e462e36ce3be39e772c180e86039b2783a2ec07a28fb5c55df06f4c52c9de2bcbf6955817183995497cea956ae515d2261898fa051015728e5a8aacaa68ffffffffffffffff', 16)
         super(KexGroup14, self).__init__('KexGroup14', hash_alg, 2, p)
@@ -2693,7 +2902,7 @@ class KexGroupExchange_SHA256(KexGroupExchange):
 
 
 def output_algorithms(title, alg_db, alg_type, algorithms, unknown_algs, maxlen=0, alg_sizes=None):
-    # type: (str, Dict[str, Dict[str, List[List[Optional[str]]]]], str, List[text_type], int) -> None
+    # type: (str, Dict[str, Dict[str, List[List[Optional[str]]]]], str, List[str], List[str], int, Optional[Dict[str, Iterable[int]]]) -> None
     with OutputBuffer() as obuf:
         for algorithm in algorithms:
             output_algorithm(alg_db, alg_type, algorithm, unknown_algs, maxlen, alg_sizes)
@@ -2704,7 +2913,7 @@ def output_algorithms(title, alg_db, alg_type, algorithms, unknown_algs, maxlen=
 
 
 def output_algorithm(alg_db, alg_type, alg_name, unknown_algs, alg_max_len=0, alg_sizes=None):
-    # type: (Dict[str, Dict[str, List[List[Optional[str]]]]], str, text_type, int) -> None
+    # type: (Dict[str, Dict[str, List[List[Optional[str]]]]], str, str, List[str], int, Optional[Dict[str, Iterable[int]]]) -> None
     prefix = '(' + alg_type + ') '
     if alg_max_len == 0:
         alg_max_len = len(alg_name)
@@ -2725,7 +2934,7 @@ def output_algorithm(alg_db, alg_type, alg_name, unknown_algs, alg_max_len=0, al
     texts = []
     if len(alg_name.strip()) == 0:
         return
-    alg_name_native = utils.to_ntext(alg_name)
+    alg_name_native = utils.to_text(alg_name)
     if alg_name_native in alg_db[alg_type]:
         alg_desc = alg_db[alg_type][alg_name_native]
         ldesc = len(alg_desc)
@@ -2766,7 +2975,7 @@ def output_algorithm(alg_db, alg_type, alg_name, unknown_algs, alg_max_len=0, al
 
 
 def output_compatibility(algs, client_audit, for_server=True):
-    # type: (SSH.Algorithms, bool) -> None
+    # type: (SSH.Algorithms, bool, bool) -> None
 
     # Don't output any compatibility info if we're doing a client audit.
     if client_audit:
@@ -2782,9 +2991,9 @@ def output_compatibility(algs, client_audit, for_server=True):
         if v_from is None:
             continue
         if v_till is None:
-            comp_text.append('{0} {1}+'.format(ssh_prod, v_from))
+            comp_text.append('{} {}+'.format(ssh_prod, v_from))
         elif v_from == v_till:
-            comp_text.append('{0} {1}'.format(ssh_prod, v_from))
+            comp_text.append('{} {}'.format(ssh_prod, v_from))
         else:
             software = SSH.Software(None, ssh_prod, v_from, None, None)
             if software.compare_version(v_till) > 0:
@@ -2797,15 +3006,19 @@ def output_compatibility(algs, client_audit, for_server=True):
 
 
 def output_security_sub(sub, software, client_audit, padlen):
-    # type: (str, Optional[SSH.Software], int) -> None
+    # type: (str, Optional[SSH.Software], bool, int) -> None
     secdb = SSH.Security.CVE if sub == 'cve' else SSH.Security.TXT
     if software is None or software.product not in secdb:
         return
     for line in secdb[software.product]:
-        vfrom, vtill = line[0:2]  # type: str, str
+        vfrom = ''  # type: str
+        vtill = ''  # type: str
+        vfrom, vtill = line[0:2]
         if not software.between_versions(vfrom, vtill):
             continue
-        target, name = line[2:4]  # type: int, str
+        target = 0  # type: int
+        name = ''  # type: str
+        target, name = line[2:4]
         is_server = target & 1 == 1
         is_client = target & 2 == 2
         # is_local = target & 4 == 4
@@ -2815,20 +3028,22 @@ def output_security_sub(sub, software, client_audit, padlen):
             continue
         p = '' if out.batch else ' ' * (padlen - len(name))
         if sub == 'cve':
-            cvss, descr = line[4:6]  # type: float, str
+            cvss = 0.0  # type: float
+            descr = ''  # type: str
+            cvss, descr = line[4:6]
 
             # Critical CVSS scores (>= 8.0) are printed as a fail, otherwise they are printed as a warning.
             out_func = out.warn
             if cvss >= 8.0:
                 out_func = out.fail
-            out_func('(cve) {0}{1} -- (CVSSv2: {2}) {3}'.format(name, p, cvss, descr))
+            out_func('(cve) {}{} -- (CVSSv2: {}) {}'.format(name, p, cvss, descr))
         else:
             descr = line[4]
-            out.fail('(sec) {0}{1} -- {2}'.format(name, p, descr))
+            out.fail('(sec) {}{} -- {}'.format(name, p, descr))
 
 
 def output_security(banner, client_audit, padlen):
-    # type: (Optional[SSH.Banner], int) -> None
+    # type: (Optional[SSH.Banner], bool, int) -> None
     with OutputBuffer() as obuf:
         if banner is not None:
             software = SSH.Software.parse(banner)
@@ -2841,7 +3056,7 @@ def output_security(banner, client_audit, padlen):
 
 
 def output_fingerprints(algs, sha256=True):
-    # type: (SSH.Algorithms, bool, int) -> None
+    # type: (SSH.Algorithms, bool) -> None
     with OutputBuffer() as obuf:
         fps = []
         if algs.ssh1kex is not None:
@@ -2871,7 +3086,7 @@ def output_fingerprints(algs, sha256=True):
             fpo = fp.sha256 if sha256 else fp.md5
             # p = '' if out.batch else ' ' * (padlen - len(name))
             # out.good('(fin) {0}{1} -- {2} {3}'.format(name, p, bits, fpo))
-            out.good('(fin) {0}: {1}'.format(name, fpo))
+            out.good('(fin) {}: {}'.format(name, fpo))
     if len(obuf) > 0:
         out.head('# fingerprints')
         obuf.flush()
@@ -2880,7 +3095,7 @@ def output_fingerprints(algs, sha256=True):
 
 # Returns True if no warnings or failures encountered in configuration.
 def output_recommendations(algs, software, padlen=0):
-    # type: (SSH.Algorithms, Optional[SSH.Software], int) -> None
+    # type: (SSH.Algorithms, Optional[SSH.Software], int) -> bool
 
     ret = True
     # PuTTY's algorithms cannot be modified, so there's no point in issuing recommendations.
@@ -2937,15 +3152,15 @@ def output_recommendations(algs, software, padlen=0):
                             an, sg, fn = 'change', '!', out.fail
                             ret = False
                             chg_additional_info = ' (increase modulus size to 2048 bits or larger)'
-                        b = '(SSH{0})'.format(sshv) if sshv == 1 else ''
+                        b = '(SSH{})'.format(sshv) if sshv == 1 else ''
                         fm = '(rec) {0}{1}{2}-- {3} algorithm to {4}{5} {6}'
                         fn(fm.format(sg, name, p, alg_type, an, chg_additional_info, b))
     if len(obuf) > 0:
         if software is not None:
-            title = '(for {0})'.format(software.display(False))
+            title = '(for {})'.format(software.display(False))
         else:
             title = ''
-        out.head('# algorithm recommendations {0}'.format(title))
+        out.head('# algorithm recommendations {}'.format(title))
         obuf.flush(True)  # Sort the output so that it is always stable (needed for repeatable testing).
         out.sep()
     return ret
@@ -2969,7 +3184,7 @@ def output_info(software, client_audit, any_problems):
 
 
 def output(aconf, banner, header, client_host=None, kex=None, pkm=None):
-    # type: (Optional[SSH.Banner], List[text_type], Optional[SSH2.Kex], Optional[SSH1.PublicKeyMessage]) -> None
+    # type: (AuditConf, Optional[SSH.Banner], List[str], Optional[str], Optional[SSH2.Kex], Optional[SSH1.PublicKeyMessage]) -> None
 
     # If the user requested JSON output, output that and return immediately.
     if aconf.json:
@@ -2981,11 +3196,11 @@ def output(aconf, banner, header, client_host=None, kex=None, pkm=None):
     algs = SSH.Algorithms(pkm, kex)
     with OutputBuffer() as obuf:
         if client_audit:
-            out.good('(gen) client IP: {0}'.format(client_host))
+            out.good('(gen) client IP: {}'.format(client_host))
         if len(header) > 0:
             out.info('(gen) header: ' + '\n'.join(header))
         if banner is not None:
-            out.good('(gen) banner: {0}'.format(banner))
+            out.good('(gen) banner: {}'.format(banner))
             if not banner.valid_ascii:
                 # NOTE: RFC 4253, Section 4.2
                 out.warn('(gen) banner contains non-printable ASCII')
@@ -2993,24 +3208,25 @@ def output(aconf, banner, header, client_host=None, kex=None, pkm=None):
                 out.fail('(gen) protocol SSH1 enabled')
             software = SSH.Software.parse(banner)
             if software is not None:
-                out.good('(gen) software: {0}'.format(software))
+                out.good('(gen) software: {}'.format(software))
         else:
             software = None
         output_compatibility(algs, client_audit)
         if kex is not None:
             compressions = [x for x in kex.server.compression if x != 'none']
             if len(compressions) > 0:
-                cmptxt = 'enabled ({0})'.format(', '.join(compressions))
+                cmptxt = 'enabled ({})'.format(', '.join(compressions))
             else:
                 cmptxt = 'disabled'
-            out.good('(gen) compression: {0}'.format(cmptxt))
+            out.good('(gen) compression: {}'.format(cmptxt))
     if len(obuf) > 0:
         out.head('# general')
         obuf.flush()
         out.sep()
     maxlen = algs.maxlen + 1
     output_security(banner, client_audit, maxlen)
-    unknown_algorithms = []  # Filled in by output_algorithms() with unidentified algs.
+    # Filled in by output_algorithms() with unidentified algs.
+    unknown_algorithms = []  # type: List[str]
     if pkm is not None:
         adb = SSH1.KexDB.ALGORITHMS
         ciphers = pkm.supported_ciphers
@@ -3069,43 +3285,32 @@ def make_policy(aconf, banner, header, kex=None):
 class Utils:
     @classmethod
     def _type_err(cls, v, target):
-        # type: (Any, text_type) -> TypeError
-        return TypeError('cannot convert {0} to {1}'.format(type(v), target))
+        # type: (Any, str) -> TypeError
+        return TypeError('cannot convert {} to {}'.format(type(v), target))
 
     @classmethod
     def to_bytes(cls, v, enc='utf-8'):
-        # type: (Union[binary_type, text_type], str) -> binary_type
-        if isinstance(v, binary_type):
+        # type: (Union[bytes, str], str) -> bytes
+        if isinstance(v, bytes):
             return v
-        elif isinstance(v, text_type):
+        elif isinstance(v, str):
             return v.encode(enc)
         raise cls._type_err(v, 'bytes')
 
     @classmethod
-    def to_utext(cls, v, enc='utf-8'):
-        # type: (Union[text_type, binary_type], str) -> text_type
-        if isinstance(v, text_type):
+    def to_text(cls, v, enc='utf-8'):
+        # type: (Union[str, bytes], str) -> str
+        if isinstance(v, str):
             return v
-        elif isinstance(v, binary_type):
+        elif isinstance(v, bytes):
             return v.decode(enc)
         raise cls._type_err(v, 'unicode text')
 
     @classmethod
-    def to_ntext(cls, v, enc='utf-8'):
-        # type: (Union[text_type, binary_type], str) -> str
-        if isinstance(v, str):
-            return v
-        elif isinstance(v, text_type):
-            return v.encode(enc)  # PY2 only
-        elif isinstance(v, binary_type):
-            return v.decode(enc)  # PY3 only
-        raise cls._type_err(v, 'native text')
-
-    @classmethod
     def _is_ascii(cls, v, char_filter=lambda x: x <= 127):
-        # type: (Union[text_type, str], Callable[[int], bool]) -> bool
+        # type: (str, Callable[[int], bool]) -> bool
         r = False
-        if isinstance(v, (text_type, str)):
+        if isinstance(v, str):
             for c in v:
                 i = cls.ctoi(c)
                 if not char_filter(i):
@@ -3115,8 +3320,8 @@ class Utils:
 
     @classmethod
     def _to_ascii(cls, v, char_filter=lambda x: x <= 127, errors='replace'):
-        # type: (Union[text_type, str], Callable[[int], bool], str) -> str
-        if isinstance(v, (text_type, str)):
+        # type: (str, Callable[[int], bool], str) -> str
+        if isinstance(v, str):
             r = bytearray()
             for c in v:
                 i = cls.ctoi(c)
@@ -3126,27 +3331,27 @@ class Utils:
                     if errors == 'ignore':
                         continue
                     r.append(63)
-            return cls.to_ntext(r.decode('ascii'))
+            return cls.to_text(r.decode('ascii'))
         raise cls._type_err(v, 'ascii')
 
     @classmethod
     def is_ascii(cls, v):
-        # type: (Union[text_type, str]) -> bool
+        # type: (str) -> bool
         return cls._is_ascii(v)
 
     @classmethod
     def to_ascii(cls, v, errors='replace'):
-        # type: (Union[text_type, str], str) -> str
+        # type: (str, str) -> str
         return cls._to_ascii(v, errors=errors)
 
     @classmethod
     def is_print_ascii(cls, v):
-        # type: (Union[text_type, str]) -> bool
+        # type: (str) -> bool
         return cls._is_ascii(v, lambda x: 126 >= x >= 32)
 
     @classmethod
     def to_print_ascii(cls, v, errors='replace'):
-        # type: (Union[text_type, str], str) -> str
+        # type: (str, str) -> str
         return cls._to_ascii(v, lambda x: 126 >= x >= 32, errors)
 
     @classmethod
@@ -3166,8 +3371,8 @@ class Utils:
 
     @classmethod
     def ctoi(cls, c):
-        # type: (Union[text_type, str, int]) -> int
-        if isinstance(c, (text_type, str)):
+        # type: (Union[str, int]) -> int
+        if isinstance(c, str):
             return ord(c[0])
         else:
             return c
@@ -3187,230 +3392,6 @@ class Utils:
             return float(v)
         except Exception:  # pylint: disable=bare-except
             return -1.0
-
-
-# Validates policy files and performs policy testing
-class Policy:
-
-    def __init__(self, policy_file=None, policy_data=None):
-        self._name = None
-        self._version = None
-        self._banner = None
-        self._header = None
-        self._compressions = None
-        self._host_keys = None
-        self._kex = None
-        self._ciphers = None
-        self._macs = None
-
-        if (policy_file is None) and (policy_data is None):
-            raise RuntimeError('policy_file and policy_data must not both be None.')
-        elif (policy_file is not None) and (policy_data is not None):
-            raise RuntimeError('policy_file and policy_data must not both be specified.')
-
-        if policy_file is not None:
-            with open(policy_file, "r") as f:
-                policy_data = f.read()
-
-        for line in policy_data.split("\n"):
-            line = line.strip()
-            if (len(line) == 0) or line.startswith('#'):
-                continue
-
-            key = None
-            val = None
-            try:
-                key, val = line.split('=')
-            except ValueError:
-                raise ValueError("could not parse line: %s" % line)
-
-            key = key.strip()
-            val = val.strip()
-
-            if key not in ['name', 'version', 'banner', 'header', 'compressions', 'host keys', 'key exchanges', 'ciphers', 'macs']:
-                raise ValueError("invalid field found in policy: %s" % line)
-
-            if key in ['name', 'banner', 'header']:
-
-                # If the banner value is blank, set it to "" so that the code below handles it.
-                if len(val) < 2:
-                    val = "\"\""
-
-                if (val[0] != '"') or (val[-1] != '"'):
-                    raise ValueError('the value for the %s field must be enclosed in quotes: %s' % (key, val))
-
-                # Remove the surrounding quotes, and unescape quotes & newlines.
-                val = val[1:-1]. replace("\\\"", "\"").replace("\\n", "\n")
-
-                if key == 'name':
-                    self._name = val
-                elif key == 'banner':
-                    self._banner = val
-                else:
-                    self._header = val
-            elif key == 'version':
-                self._version = val
-            elif key in ['compressions', 'host keys', 'key exchanges', 'ciphers', 'macs']:
-                try:
-                    algs = val.split(',')
-                except ValueError:
-                    # If the value has no commas, then set the algorithm list to just the value.
-                    algs = [val]
-
-                # Strip whitespace in each algorithm name.
-                algs = [alg.strip() for alg in algs]
-
-                if key == 'compressions':
-                    self._compressions = algs
-                elif key == 'host keys':
-                    self._host_keys = algs
-                elif key == 'key exchanges':
-                    self._kex = algs
-                elif key == 'ciphers':
-                    self._ciphers = algs
-                elif key == 'macs':
-                    self._macs = algs
-
-        if self._name is None:
-            raise ValueError('The policy does not have a name field.')
-        if self._version is None:
-            raise ValueError('The policy does not have a version field.')
-
-
-    @staticmethod
-    def create(host, banner, header, kex):
-        '''Creates a policy based on a server configuration.  Returns a string.'''
-
-        today = date.today().strftime('%Y/%m/%d')
-        compressions = None
-        host_keys = None
-        kex_algs = None
-        ciphers = None
-        macs = None
-
-        if kex.server.compression is not None:
-            compressions = ', '.join(kex.server.compression)
-        if kex.key_algorithms is not None:
-            host_keys = ', '.join(kex.key_algorithms)
-        if kex.kex_algorithms is not None:
-            kex_algs = ', '.join(kex.kex_algorithms)
-        if kex.server.encryption is not None:
-            ciphers = ', '.join(kex.server.encryption)
-        if kex.server.mac is not None:
-            macs = ', '.join(kex.server.mac)
-
-        policy_data = '''#
-# Custom policy based on %s (created on %s)
-#
-
-# The name of this policy (displayed in the output during scans).  Must be in quotes.
-name = "Custom Policy (based on %s on %s)"
-
-# The version of this policy (displayed in the output during scans).  Not parsed, and may be any value, including strings.
-version = 1
-
-# The banner that must match exactly.  Commented out to ignore banners, since minor variability in the banner is sometimes normal.
-# banner = "%s"
-
-# The header that must match exactly.  Commented out to ignore headers, since variability in the header is sometimes normal.
-# header = "%s"
-
-# The compression options that must match exactly (order matters).  Commented out to ignore by default.
-# compressions = %s
-
-# The host key types that must match exactly (order matters).
-host keys = %s
-
-# The key exchange algorithms that must match exactly (order matters).
-key exchanges = %s
-
-# The ciphers that must match exactly (order matters).
-ciphers = %s
-
-# The MACs that must match exactly (order matters).
-macs = %s
-''' % (host, today, host, today, banner, header, compressions, host_keys, kex_algs, ciphers, macs)
-
-        return policy_data
-
-
-    def evaluate(self, banner, header, kex):
-        '''Evaluates a server configuration against this policy.  Returns a tuple of a boolean (True if server adheres to policy) and an array of strings that holds error messages.'''
-
-        ret = True
-        errors = []
-
-        banner_str = str(banner)
-        if (self._banner is not None) and (banner_str != self._banner):
-            ret = False
-            errors.append('Banner did not match. Expected: [%s]; Actual: [%s]' % (self._banner, banner_str))
-
-        if (self._header is not None) and (header != self._header):
-            ret = False
-            errors.append('Header did not match. Expected: [%s]; Actual: [%s]' % (self._header, header))
-
-        if (self._compressions is not None) and (kex.server.compression != self._compressions):
-            ret = False
-            errors.append('Compression types did not match. Expected: %s; Actual: %s' % (self._compressions, kex.server.compression))
-
-        if (self._host_keys is not None) and (kex.key_algorithms != self._host_keys):
-            ret = False
-            errors.append('Host key types did not match. Expected: %s; Actual: %s' % (self._host_keys, kex.key_algorithms))
-
-        if (self._kex is not None) and (kex.kex_algorithms != self._kex):
-            ret = False
-            errors.append('Key exchanges did not match. Expected: %s; Actual: %s' % (self._kex, kex.kex_algorithms))
-
-        if (self._ciphers is not None) and (kex.server.encryption != self._ciphers):
-            ret = False
-            errors.append('Ciphers did not match. Expected: %s; Actual: %s' % (self._ciphers, kex.server.encryption))
-
-        if (self._macs is not None) and (kex.server.mac != self._macs):
-            ret = False
-            errors.append('MACs did not match. Expected: %s; Actual: %s' % (self._macs, kex.server.mac))
-
-        return ret, errors
-
-
-    def get_name_and_version(self):
-        '''Returns a string of this Policy's name and version.'''
-        return '%s v%s' % (self._name, self._version)
-
-
-    def __str__(self):
-        undefined = '{undefined}'
-
-        name = undefined
-        version = undefined
-        banner = undefined
-        header = undefined
-        compressions_str = undefined
-        host_keys_str = undefined
-        kex_str = undefined
-        ciphers_str = undefined
-        macs_str = undefined
-
-        if self._name is not None:
-            name = '[%s]' % self._name
-        if self._version is not None:
-            version = '[%s]' % self._version
-        if self._banner is not None:
-            banner = '[%s]' % self._banner
-        if self._header is not None:
-            header = '[%s]' % self._header
-
-        if self._compressions is not None:
-            compressions_str = ', '.join(self._compressions)
-        if self._host_keys is not None:
-            host_keys_str = ', '.join(self._host_keys)
-        if self._kex is not None:
-            kex_str = ', '.join(self._kex)
-        if self._ciphers is not None:
-            ciphers_str = ', '.join(self._ciphers)
-        if self._macs is not None:
-            macs_str = ', '.join(self._macs)
-
-        return "Name: %s\nVersion: %s\nBanner: %s\nHeader: %s\nCompressions: %s\nHost Keys: %s\nKey Exchanges: %s\nCiphers: %s\nMACs: %s" % (name, version, banner, header, compressions_str, host_keys_str, kex_str, ciphers_str, macs_str)
 
 
 def build_struct(banner, kex=None, pkm=None, client_host=None):
@@ -3510,7 +3491,7 @@ def audit(aconf, sshv=None):
         if err is None:
             err = '[exception] did not receive banner.'
         else:
-            err = '[exception] did not receive banner: {0}'.format(err)
+            err = '[exception] did not receive banner: {}'.format(err)
     if err is None:
         packet_type, payload = s.read_packet(sshv)
         if packet_type < 0:
@@ -3520,11 +3501,11 @@ def audit(aconf, sshv=None):
                 else:
                     payload_txt = u'empty'
             except UnicodeDecodeError:
-                payload_txt = u'"{0}"'.format(repr(payload).lstrip('b')[1:-1])
+                payload_txt = u'"{}"'.format(repr(payload).lstrip('b')[1:-1])
             if payload_txt == u'Protocol major versions differ.':
                 if sshv == 2 and aconf.ssh1:
                     return audit(aconf, 1)
-            err = '[exception] error reading packet ({0})'.format(payload_txt)
+            err = '[exception] error reading packet ({})'.format(payload_txt)
         else:
             err_pair = None
             if sshv == 1 and packet_type != SSH.Protocol.SMSG_PUBLIC_KEY:
