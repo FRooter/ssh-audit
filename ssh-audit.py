@@ -3340,9 +3340,10 @@ macs = %s
         ret = True
         errors = []
 
-        if (self._banner is not None) and (banner != self._banner):
+        banner_str = str(banner)
+        if (self._banner is not None) and (banner_str != self._banner):
             ret = False
-            errors.append('Banner did not match. Expected: [%s]; Actual: [%s]' % (self._banner, banner))
+            errors.append('Banner did not match. Expected: [%s]; Actual: [%s]' % (self._banner, banner_str))
 
         if (self._header is not None) and (header != self._header):
             ret = False
@@ -3491,7 +3492,7 @@ def build_struct(banner, kex=None, pkm=None, client_host=None):
 
 
 def audit(aconf, sshv=None):
-    # type: (AuditConf, Optional[int]) -> None
+    # type: (AuditConf, Optional[int]) -> int
     out.batch = aconf.batch
     out.verbose = aconf.verbose
     out.level = aconf.level
@@ -3522,8 +3523,7 @@ def audit(aconf, sshv=None):
                 payload_txt = u'"{0}"'.format(repr(payload).lstrip('b')[1:-1])
             if payload_txt == u'Protocol major versions differ.':
                 if sshv == 2 and aconf.ssh1:
-                    audit(aconf, 1)
-                    return
+                    return audit(aconf, 1)
             err = '[exception] error reading packet ({0})'.format(payload_txt)
         else:
             err_pair = None
@@ -3538,7 +3538,7 @@ def audit(aconf, sshv=None):
     if err is not None:
         output(aconf, banner, header)
         out.fail(err)
-        sys.exit(1)
+        return 1
     if sshv == 1:
         pkm = SSH1.PublicKeyMessage.parse(payload)
         if aconf.json:
@@ -3557,7 +3557,7 @@ def audit(aconf, sshv=None):
 
         # This is a policy test.
         elif (aconf.policy is not None) and (aconf.make_policy is False):
-            evaluate_policy(aconf, banner, header, kex=kex)
+            return 0 if evaluate_policy(aconf, banner, header, kex=kex) else 1
 
         # A new policy should be made from this scan.
         elif (aconf.policy is None) and (aconf.make_policy is True):
@@ -3566,6 +3566,7 @@ def audit(aconf, sshv=None):
         else:
             raise RuntimeError('Internal error while handling output: %r %r' % (aconf.policy is None, aconf.make_policy))
 
+    return 0
 
 
 utils = Utils()
@@ -3574,8 +3575,9 @@ out = Output()
 
 def main():
     conf = AuditConf.from_cmdline(sys.argv[1:], usage)
-    audit(conf)
+    return audit(conf)
 
 
 if __name__ == '__main__':  # pragma: nocover
-    main()
+    exit_code = main()
+    sys.exit(exit_code)

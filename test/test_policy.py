@@ -139,7 +139,7 @@ macs = mac_alg1, mac_alg2, mac_alg3'''
     def test_policy_invalid_5(self):
         '''Basic policy, but is missing quotes in the banner field.'''
 
-        policy_data = '''# This is a comment')
+        policy_data = '''# This is a comment
 name = "Test Policy"
 version = 1
 
@@ -162,7 +162,7 @@ macs = mac_alg1, mac_alg2, mac_alg3'''
     def test_policy_invalid_6(self):
         '''Basic policy, but is missing quotes in the header field.'''
 
-        policy_data = '''# This is a comment')
+        policy_data = '''# This is a comment
 name = "Test Policy"
 version = 1
 
