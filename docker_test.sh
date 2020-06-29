@@ -478,6 +478,9 @@ function run_policy_test {
     elif [[ ${config_number} == 'config2' ]]; then
         version='8.0p1'
         config='sshd_config-8.0p1_test1'
+    elif [[ ${config_number} == 'config3' ]]; then
+        version='5.6p1'
+        config='sshd_config-5.6p1_test4'
     fi
 
     server_exec="/openssh/sshd-${version} -D -f /etc/ssh/${config}"
@@ -581,6 +584,23 @@ run_policy_test 'config1' 'test4' '1'
 run_policy_test 'config1' 'test5' '1'
 run_policy_test 'config2' 'test6' '0'
 
+# Passing test with host key certificate and CA key certificates.
+run_policy_test 'config3' 'test7' '0'
+
+# Failing test with host key certificate and non-compliant CA key length.
+run_policy_test 'config3' 'test8' '1'
+
+# Failing test with non-compliant host key certificate and CA key certificate.
+run_policy_test 'config3' 'test9' '1'
+
+# Failing test with non-compliant host key certificate and non-compliant CA key certificate.
+run_policy_test 'config3' 'test10' '1'
+
+# Passing test with host key size check.
+run_policy_test 'config2' 'test11' '0'
+
+# Failing test with non-compliant host key size check.
+run_policy_test 'config2' 'test12' '1'
 
 
 # The test functions above will terminate the script on failure, so if we reached here,

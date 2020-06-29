@@ -38,6 +38,7 @@ import select
 import socket
 import struct
 import sys
+import traceback
 # pylint: disable=unused-import
 from typing import Dict, List, Set, Sequence, Tuple, Iterable
 from typing import Callable, Optional, Union, Any
@@ -85,15 +86,17 @@ def usage(err=None):
 class Policy:
 
     def __init__(self, policy_file=None, policy_data=None):
-        self._name = None
-        self._version = None
-        self._banner = None
+        self._name = None  # type: Optional[str]
+        self._version = None  # type: Optional[str]
+        self._banner = None  # type: Optional[str]
         self._header = None
         self._compressions = None
         self._host_keys = None
         self._kex = None
         self._ciphers = None
         self._macs = None
+        self._hostkey_sizes = None  # type: Optional[Dict]
+        self._cakey_sizes = None  # type: Optional[Dict]
 
         if (policy_file is None) and (policy_data is None):
             raise RuntimeError('policy_file and policy_data must not both be None.')
@@ -119,7 +122,7 @@ class Policy:
             key = key.strip()
             val = val.strip()
 
-            if key not in ['name', 'version', 'banner', 'header', 'compressions', 'host keys', 'key exchanges', 'ciphers', 'macs']:
+            if key not in ['name', 'version', 'banner', 'header', 'compressions', 'host keys', 'key exchanges', 'ciphers', 'macs'] and not key.startswith('hostkey_size_') and not key.startswith('cakey_size_'):
                 raise ValueError("invalid field found in policy: %s" % line)
 
             if key in ['name', 'banner', 'header']:
@@ -162,6 +165,17 @@ class Policy:
                     self._ciphers = algs
                 elif key == 'macs':
                     self._macs = algs
+            elif key.startswith('hostkey_size_'):
+                hostkey_type = key[13:]
+                if self._hostkey_sizes is None:
+                    self._hostkey_sizes = {}
+                self._hostkey_sizes[hostkey_type] = int(val)
+            elif key.startswith('cakey_size_'):
+                cakey_type = key[11:]
+                if self._cakey_sizes is None:
+                    self._cakey_sizes = {}
+                self._cakey_sizes[cakey_type] = int(val)
+
 
         if self._name is None:
             raise ValueError('The policy does not have a name field.')
@@ -179,6 +193,8 @@ class Policy:
         kex_algs = None
         ciphers = None
         macs = None
+        rsa_hostkey_sizes_str = ''
+        rsa_cakey_sizes_str = ''
 
         if kex.server.compression is not None:
             compressions = ', '.join(kex.server.compression)
@@ -190,6 +206,18 @@ class Policy:
             ciphers = ', '.join(kex.server.encryption)
         if kex.server.mac is not None:
             macs = ', '.join(kex.server.mac)
+        if kex.rsa_key_sizes() is not None:
+            rsa_key_sizes_dict = kex.rsa_key_sizes()
+            for host_key_type in sorted(rsa_key_sizes_dict):
+                hostkey_size, cakey_size = rsa_key_sizes_dict[host_key_type]
+
+                rsa_hostkey_sizes_str = "%shostkey_size_%s = %d\n" % (rsa_hostkey_sizes_str, host_key_type, hostkey_size)
+                if cakey_size != -1:
+                    rsa_cakey_sizes_str = "%scakey_size_%s = %d\n" % (rsa_cakey_sizes_str, host_key_type, cakey_size)
+            rsa_hostkey_sizes_str = "\n# RSA host key sizes.\n%s" % rsa_hostkey_sizes_str
+            if len(rsa_cakey_sizes_str) > 0:
+                rsa_cakey_sizes_str = "\n# RSA CA key sizes.\n%s" % rsa_cakey_sizes_str
+
 
         policy_data = '''#
 # Custom policy based on %s (created on %s)
@@ -209,7 +237,7 @@ version = 1
 
 # The compression options that must match exactly (order matters).  Commented out to ignore by default.
 # compressions = %s
-
+%s%s
 # The host key types that must match exactly (order matters).
 host keys = %s
 
@@ -221,7 +249,7 @@ ciphers = %s
 
 # The MACs that must match exactly (order matters).
 macs = %s
-''' % (host, today, host, today, banner, header, compressions, host_keys, kex_algs, ciphers, macs)
+''' % (host, today, host, today, banner, header, compressions, rsa_hostkey_sizes_str, rsa_cakey_sizes_str, host_keys, kex_algs, ciphers, macs)
 
         return policy_data
 
@@ -248,6 +276,28 @@ macs = %s
         if (self._host_keys is not None) and (kex.key_algorithms != self._host_keys):
             ret = False
             errors.append('Host key types did not match. Expected: %s; Actual: %s' % (self._host_keys, kex.key_algorithms))
+
+        if self._hostkey_sizes is not None:
+            hostkey_types = list(self._hostkey_sizes.keys())
+            hostkey_types.sort()  # Sorted to make testing output repeatable.
+            for hostkey_type in hostkey_types:
+                expected_hostkey_size = self._hostkey_sizes[hostkey_type]
+                if hostkey_type in kex.rsa_key_sizes():
+                    actual_hostkey_size, actual_cakey_size = kex.rsa_key_sizes()[hostkey_type]
+                    if actual_hostkey_size != expected_hostkey_size:
+                        ret = False
+                        errors.append('RSA hostkey (%s) sizes did not match.  Expected: %d; Actual: %d' % (hostkey_type, expected_hostkey_size, actual_hostkey_size))
+
+        if self._cakey_sizes is not None:
+            hostkey_types = list(self._cakey_sizes.keys())
+            hostkey_types.sort()  # Sorted to make testing output repeatable.
+            for hostkey_type in hostkey_types:
+                expected_cakey_size = self._cakey_sizes[hostkey_type]
+                if hostkey_type in kex.rsa_key_sizes():
+                    actual_hostkey_size, actual_cakey_size = kex.rsa_key_sizes()[hostkey_type]
+                    if actual_cakey_size != expected_cakey_size:
+                        ret = False
+                        errors.append('RSA CA key (%s) sizes did not match.  Expected: %d; Actual: %d' % (hostkey_type, expected_cakey_size, actual_cakey_size))
 
         if (self._kex is not None) and (kex.kex_algorithms != self._kex):
             ret = False
@@ -458,7 +508,7 @@ class AuditConf:
             try:
                 aconf.policy = Policy(policy_file=aconf.policy_file)
             except Exception as e:
-                print("Error while loading policy file: %s" % str(e))
+                print("Error while loading policy file: %s: %s" % (str(e), traceback.format_exc()))
                 sys.exit(-1)
 
         return aconf
