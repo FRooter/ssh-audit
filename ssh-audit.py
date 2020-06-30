@@ -84,19 +84,19 @@ def usage(err: Optional[str] = None) -> None:
 # Validates policy files and performs policy testing
 class Policy:
 
-    def __init__(self, policy_file=None, policy_data=None):
+    def __init__(self, policy_file: str = None, policy_data: str = None) -> None:
         self._name = None  # type: Optional[str]
         self._version = None  # type: Optional[str]
         self._banner = None  # type: Optional[str]
-        self._header = None
-        self._compressions = None
-        self._host_keys = None
-        self._kex = None
-        self._ciphers = None
-        self._macs = None
-        self._hostkey_sizes = None  # type: Optional[Dict]
-        self._cakey_sizes = None  # type: Optional[Dict]
-        self._dh_modulus_sizes = None  # type: Optional[int]
+        self._header = None  # type: Optional[str]
+        self._compressions = None  # type: Optional[List[str]]
+        self._host_keys = None  # type: Optional[List[str]]
+        self._kex = None  # type: Optional[List[str]]
+        self._ciphers = None  # type: Optional[List[str]]
+        self._macs = None  # type: Optional[List[str]]
+        self._hostkey_sizes = None  # type: Optional[Dict[str, int]]
+        self._cakey_sizes = None  # type: Optional[Dict[str, int]]
+        self._dh_modulus_sizes = None  # type: Optional[Dict[str, int]]
 
         if (policy_file is None) and (policy_data is None):
             raise RuntimeError('policy_file and policy_data must not both be None.')
@@ -107,7 +107,11 @@ class Policy:
             with open(policy_file, "r") as f:
                 policy_data = f.read()
 
-        for line in policy_data.split("\n"):
+        lines = []
+        if policy_data is not None:
+            lines = policy_data.split("\n")
+
+        for line in lines:
             line = line.strip()
             if (len(line) == 0) or line.startswith('#'):
                 continue
@@ -189,7 +193,7 @@ class Policy:
 
 
     @staticmethod
-    def create(host, banner, header, kex):
+    def create(host: str, banner: Optional['SSH.Banner'], header: List[str], kex: Optional['SSH2.Kex']) -> str:
         '''Creates a policy based on a server configuration.  Returns a string.'''
 
         today = date.today().strftime('%Y/%m/%d')
@@ -202,34 +206,37 @@ class Policy:
         rsa_cakey_sizes_str = ''
         dh_modulus_sizes_str = ''
 
-        if kex.server.compression is not None:
-            compressions = ', '.join(kex.server.compression)
-        if kex.key_algorithms is not None:
-            host_keys = ', '.join(kex.key_algorithms)
-        if kex.kex_algorithms is not None:
-            kex_algs = ', '.join(kex.kex_algorithms)
-        if kex.server.encryption is not None:
-            ciphers = ', '.join(kex.server.encryption)
-        if kex.server.mac is not None:
-            macs = ', '.join(kex.server.mac)
-        if kex.rsa_key_sizes():
-            rsa_key_sizes_dict = kex.rsa_key_sizes()
-            for host_key_type in sorted(rsa_key_sizes_dict):
-                hostkey_size, cakey_size = rsa_key_sizes_dict[host_key_type]
+        if kex is not None:
+            if kex.server.compression is not None:
+                compressions = ', '.join(kex.server.compression)
+            if kex.key_algorithms is not None:
+                host_keys = ', '.join(kex.key_algorithms)
+            if kex.kex_algorithms is not None:
+                kex_algs = ', '.join(kex.kex_algorithms)
+            if kex.server.encryption is not None:
+                ciphers = ', '.join(kex.server.encryption)
+            if kex.server.mac is not None:
+                macs = ', '.join(kex.server.mac)
+            if kex.rsa_key_sizes():
+                rsa_key_sizes_dict = kex.rsa_key_sizes()
+                for host_key_type in sorted(rsa_key_sizes_dict):
+                    hostkey_size, cakey_size = rsa_key_sizes_dict[host_key_type]
 
-                rsa_hostkey_sizes_str = "%shostkey_size_%s = %d\n" % (rsa_hostkey_sizes_str, host_key_type, hostkey_size)
-                if cakey_size != -1:
-                    rsa_cakey_sizes_str = "%scakey_size_%s = %d\n" % (rsa_cakey_sizes_str, host_key_type, cakey_size)
-            rsa_hostkey_sizes_str = "\n# RSA host key sizes.\n%s" % rsa_hostkey_sizes_str
-            if len(rsa_cakey_sizes_str) > 0:
-                rsa_cakey_sizes_str = "\n# RSA CA key sizes.\n%s" % rsa_cakey_sizes_str
-        if kex.dh_modulus_sizes():
-            dh_modulus_sizes_dict = kex.dh_modulus_sizes()
-            for gex_type in sorted(dh_modulus_sizes_dict):
-                modulus_size, _ = dh_modulus_sizes_dict[gex_type]
-                dh_modulus_sizes_str = "%sdh_modulus_size_%s = %d\n" % (dh_modulus_sizes_str, gex_type, modulus_size)
-            if len(dh_modulus_sizes_str) > 0:
-                dh_modulus_sizes_str = "\n# Group exchange DH modulus sizes.\n%s" % dh_modulus_sizes_str
+                    rsa_hostkey_sizes_str = "%shostkey_size_%s = %d\n" % (rsa_hostkey_sizes_str, host_key_type, hostkey_size)
+                    if cakey_size != -1:
+                        rsa_cakey_sizes_str = "%scakey_size_%s = %d\n" % (rsa_cakey_sizes_str, host_key_type, cakey_size)
+
+                if len(rsa_hostkey_sizes_str) > 0:
+                    rsa_hostkey_sizes_str = "\n# RSA host key sizes.\n%s" % rsa_hostkey_sizes_str
+                if len(rsa_cakey_sizes_str) > 0:
+                    rsa_cakey_sizes_str = "\n# RSA CA key sizes.\n%s" % rsa_cakey_sizes_str
+            if kex.dh_modulus_sizes():
+                dh_modulus_sizes_dict = kex.dh_modulus_sizes()
+                for gex_type in sorted(dh_modulus_sizes_dict):
+                    modulus_size, _ = dh_modulus_sizes_dict[gex_type]
+                    dh_modulus_sizes_str = "%sdh_modulus_size_%s = %d\n" % (dh_modulus_sizes_str, gex_type, modulus_size)
+                if len(dh_modulus_sizes_str) > 0:
+                    dh_modulus_sizes_str = "\n# Group exchange DH modulus sizes.\n%s" % dh_modulus_sizes_str
 
 
         policy_data = '''#
@@ -267,7 +274,7 @@ macs = %s
         return policy_data
 
 
-    def evaluate(self, banner, header, kex):
+    def evaluate(self, banner: Optional['SSH.Banner'], header: List[str], kex: Optional['SSH2.Kex']) -> Tuple[bool, List[str]]:
         '''Evaluates a server configuration against this policy.  Returns a tuple of a boolean (True if server adheres to policy) and an array of strings that holds error messages.'''
 
         ret = True
@@ -281,6 +288,10 @@ macs = %s
         if (self._header is not None) and (header != self._header):
             ret = False
             errors.append('Header did not match. Expected: [%s]; Actual: [%s]' % (self._header, header))
+
+        # All subsequent tests require a valid kex, so end here if we don't have one.
+        if kex is None:
+            return ret, errors
 
         if (self._compressions is not None) and (kex.server.compression != self._compressions):
             ret = False
@@ -312,7 +323,7 @@ macs = %s
                         ret = False
                         errors.append('RSA CA key (%s) sizes did not match.  Expected: %d; Actual: %d' % (hostkey_type, expected_cakey_size, actual_cakey_size))
 
-        if (self._kex is not None) and (kex.kex_algorithms != self._kex):
+        if kex.kex_algorithms != self._kex:
             ret = False
             errors.append('Key exchanges did not match. Expected: %s; Actual: %s' % (self._kex, kex.kex_algorithms))
 
@@ -338,12 +349,12 @@ macs = %s
         return ret, errors
 
 
-    def get_name_and_version(self):
+    def get_name_and_version(self) -> str:
         '''Returns a string of this Policy's name and version.'''
         return '%s v%s' % (self._name, self._version)
 
 
-    def __str__(self):
+    def __str__(self) -> str:
         undefined = '{undefined}'
 
         name = undefined
@@ -381,7 +392,7 @@ macs = %s
 
 class AuditConf:
     # pylint: disable=too-many-instance-attributes
-    def __init__(self, host: Optional[str] = None, port: int = 22) -> None:
+    def __init__(self, host: str = '', port: int = 22) -> None:
         self.host = host
         self.port = port
         self.ssh1 = True
@@ -458,6 +469,7 @@ class AuditConf:
         except getopt.GetoptError as err:
             usage_cb(str(err))
         aconf.ssh1, aconf.ssh2 = False, False
+        host = ''  # type: str
         oport = None
         for o, a in opts:
             if o in ('-h', '--help'):
@@ -499,7 +511,7 @@ class AuditConf:
             usage_cb()
         if aconf.client_audit is False:
             if oport is not None:
-                host = args[0]  # type: Optional[str]
+                host = args[0]
             else:
                 mx = re.match(r'^\[([^\]]+)\](?::(.*))?$', args[0])
                 if mx is not None:
@@ -512,10 +524,8 @@ class AuditConf:
                         host, oport = s[0], s[1] if len(s) > 1 else '22'
             if not host:
                 usage_cb('host is empty')
-        else:
-            host = None
-            if oport is None:
-                oport = '2222'
+        elif oport is None:
+            oport = '2222'
         port = utils.parse_int(oport)
         if port <= 0 or port > 65535:
             usage_cb('port {} is not valid'.format(oport))
@@ -3177,7 +3187,11 @@ def output(aconf: AuditConf, banner: Optional[SSH.Banner], header: List[str], cl
         out.warn("\n\n!!! WARNING: unknown algorithm(s) found!: %s.  Please email the full output above to the maintainer (jtesta@positronsecurity.com), or create a Github issue at <https://github.com/jtesta/ssh-audit/issues>.\n" % ','.join(unknown_algorithms))
 
 
-def evaluate_policy(aconf, banner, header, kex=None):
+def evaluate_policy(aconf: AuditConf, banner: Optional['SSH.Banner'], header: List[str], kex: Optional['SSH2.Kex'] = None) -> bool:
+
+    if aconf.policy is None:
+        raise RuntimeError('Internal error: cannot evaluate against null Policy!')
+
     passed, errors = aconf.policy.evaluate(banner, header, kex)
     if aconf.json:
         json_struct = {'host': aconf.host, 'policy': aconf.policy.get_name_and_version(), 'passed': passed, 'errors': errors}
@@ -3195,8 +3209,12 @@ def evaluate_policy(aconf, banner, header, kex=None):
     return passed
 
 
-def make_policy(aconf, banner, header, kex=None):
+def make_policy(aconf: AuditConf, banner: Optional['SSH.Banner'], header: List[str], kex: Optional['SSH2.Kex']) -> None:
     policy_data = Policy.create(aconf.host, banner, header, kex)
+
+    if aconf.policy_file is None:
+        raise RuntimeError('Internal error: cannot write policy file since filename is None!')
+
     with open(aconf.policy_file, 'w') as f:
         f.write(policy_data)
 
