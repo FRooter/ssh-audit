@@ -602,6 +602,12 @@ run_policy_test 'config2' 'test11' '0'
 # Failing test with non-compliant host key size check.
 run_policy_test 'config2' 'test12' '1'
 
+# Passing test with DH modulus test.
+run_policy_test 'config2' 'test13' '0'
+
+# Failing test with DH modulus test.
+run_policy_test 'config2' 'test14' '1'
+
 
 # The test functions above will terminate the script on failure, so if we reached here,
 # all tests are successful.

@@ -96,6 +96,7 @@ class Policy:
         self._macs = None
         self._hostkey_sizes = None  # type: Optional[Dict]
         self._cakey_sizes = None  # type: Optional[Dict]
+        self._dh_modulus_sizes = None  # type: Optional[int]
 
         if (policy_file is None) and (policy_data is None):
             raise RuntimeError('policy_file and policy_data must not both be None.')
@@ -121,7 +122,7 @@ class Policy:
             key = key.strip()
             val = val.strip()
 
-            if key not in ['name', 'version', 'banner', 'header', 'compressions', 'host keys', 'key exchanges', 'ciphers', 'macs'] and not key.startswith('hostkey_size_') and not key.startswith('cakey_size_'):
+            if key not in ['name', 'version', 'banner', 'header', 'compressions', 'host keys', 'key exchanges', 'ciphers', 'macs'] and not key.startswith('hostkey_size_') and not key.startswith('cakey_size_') and not key.startswith('dh_modulus_size_'):
                 raise ValueError("invalid field found in policy: %s" % line)
 
             if key in ['name', 'banner', 'header']:
@@ -174,6 +175,11 @@ class Policy:
                 if self._cakey_sizes is None:
                     self._cakey_sizes = {}
                 self._cakey_sizes[cakey_type] = int(val)
+            elif key.startswith('dh_modulus_size_'):
+                dh_modulus_type = key[16:]
+                if self._dh_modulus_sizes is None:
+                    self._dh_modulus_sizes = {}
+                self._dh_modulus_sizes[dh_modulus_type] = int(val)
 
 
         if self._name is None:
@@ -194,6 +200,7 @@ class Policy:
         macs = None
         rsa_hostkey_sizes_str = ''
         rsa_cakey_sizes_str = ''
+        dh_modulus_sizes_str = ''
 
         if kex.server.compression is not None:
             compressions = ', '.join(kex.server.compression)
@@ -205,7 +212,7 @@ class Policy:
             ciphers = ', '.join(kex.server.encryption)
         if kex.server.mac is not None:
             macs = ', '.join(kex.server.mac)
-        if kex.rsa_key_sizes() is not None:
+        if kex.rsa_key_sizes():
             rsa_key_sizes_dict = kex.rsa_key_sizes()
             for host_key_type in sorted(rsa_key_sizes_dict):
                 hostkey_size, cakey_size = rsa_key_sizes_dict[host_key_type]
@@ -216,6 +223,13 @@ class Policy:
             rsa_hostkey_sizes_str = "\n# RSA host key sizes.\n%s" % rsa_hostkey_sizes_str
             if len(rsa_cakey_sizes_str) > 0:
                 rsa_cakey_sizes_str = "\n# RSA CA key sizes.\n%s" % rsa_cakey_sizes_str
+        if kex.dh_modulus_sizes():
+            dh_modulus_sizes_dict = kex.dh_modulus_sizes()
+            for gex_type in sorted(dh_modulus_sizes_dict):
+                modulus_size, _ = dh_modulus_sizes_dict[gex_type]
+                dh_modulus_sizes_str = "%sdh_modulus_size_%s = %d\n" % (dh_modulus_sizes_str, gex_type, modulus_size)
+            if len(dh_modulus_sizes_str) > 0:
+                dh_modulus_sizes_str = "\n# Group exchange DH modulus sizes.\n%s" % dh_modulus_sizes_str
 
 
         policy_data = '''#
@@ -236,7 +250,7 @@ version = 1
 
 # The compression options that must match exactly (order matters).  Commented out to ignore by default.
 # compressions = %s
-%s%s
+%s%s%s
 # The host key types that must match exactly (order matters).
 host keys = %s
 
@@ -248,7 +262,7 @@ ciphers = %s
 
 # The MACs that must match exactly (order matters).
 macs = %s
-''' % (host, today, host, today, banner, header, compressions, rsa_hostkey_sizes_str, rsa_cakey_sizes_str, host_keys, kex_algs, ciphers, macs)
+''' % (host, today, host, today, banner, header, compressions, rsa_hostkey_sizes_str, rsa_cakey_sizes_str, dh_modulus_sizes_str, host_keys, kex_algs, ciphers, macs)
 
         return policy_data
 
@@ -309,6 +323,17 @@ macs = %s
         if (self._macs is not None) and (kex.server.mac != self._macs):
             ret = False
             errors.append('MACs did not match. Expected: %s; Actual: %s' % (self._macs, kex.server.mac))
+
+        if self._dh_modulus_sizes is not None:
+            dh_modulus_types = list(self._dh_modulus_sizes.keys())
+            dh_modulus_types.sort()  # Sorted to make testing output repeatable.
+            for dh_modulus_type in dh_modulus_types:
+                expected_dh_modulus_size = self._dh_modulus_sizes[dh_modulus_type]
+                if dh_modulus_type in kex.dh_modulus_sizes():
+                    actual_dh_modulus_size, _ = kex.dh_modulus_sizes()[dh_modulus_type]
+                    if expected_dh_modulus_size != actual_dh_modulus_size:
+                        ret = False
+                        errors.append('Group exchange (%s) modulus sizes did not match.  Expected: %d; Actual: %d' % (dh_modulus_type, expected_dh_modulus_size, actual_dh_modulus_size))
 
         return ret, errors
 
